@@ -8,6 +8,7 @@
 #include "GameFramework/Pawn.h"
 #include "PodVehicle.generated.h"
 
+class USpringArmComponent;
 // Forward declaration of our custom movement component
 class UPodVehicleMovementComponent;
 class UCapsuleComponent;
@@ -49,6 +50,19 @@ public:
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
+
+public:
+	// Display components
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Components")
+	USceneComponent* EngineCenterPoint;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Components")
+	USceneComponent* LeftEngineRoot;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Components")
+	USceneComponent* RightEngineRoot;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Components")
+	USpringArmComponent* PodSpringArm;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Components")
+	UStaticMeshComponent* PodHullMesh;
 
 private:
 	// Our custom movement component that handles all pod movement logic.

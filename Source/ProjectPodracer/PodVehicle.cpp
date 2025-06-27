@@ -30,6 +30,34 @@ APodVehicle::APodVehicle()
 	PodMovementComponent = CreateDefaultSubobject<UPodVehicleMovementComponent>(TEXT("PodMovementComponent"));
 	PodMovementComponent->UpdatedComponent = RootComponent; // Tell the movement component what to move
 
+	EngineCenterPoint = CreateDefaultSubobject<USceneComponent>(TEXT("EngineCenterPoint"));
+	EngineCenterPoint->SetupAttachment(RootComponent);
+
+	LeftEngineRoot = CreateDefaultSubobject<USceneComponent>(TEXT("LeftEngineRoot"));
+	LeftEngineRoot->SetupAttachment(EngineCenterPoint);
+	LeftEngineRoot->SetRelativeLocation(FVector(200.f, -100.f, 0.f));
+	
+	RightEngineRoot = CreateDefaultSubobject<USceneComponent>(TEXT("RightEngineRoot"));
+	RightEngineRoot->SetupAttachment(EngineCenterPoint);
+	RightEngineRoot->SetRelativeLocation(FVector(200.f, 100.f, 0.f));
+
+	PodSpringArm = CreateDefaultSubobject<USpringArmComponent>(TEXT("PodSpringArm"));
+	PodSpringArm->SetupAttachment(RootComponent);
+	PodSpringArm->TargetArmLength = 600.0f;
+	PodSpringArm->SocketOffset = FVector(0, 0, 0.f);
+	PodSpringArm->bUsePawnControlRotation = false;
+	PodSpringArm->bEnableCameraLag = true;
+	PodSpringArm->bEnableCameraRotationLag = true;
+	PodSpringArm->CameraLagSpeed = 15.f;
+	PodSpringArm->CameraRotationLagSpeed = 12.f;
+
+	PodHullMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("PodHullMesh"));
+	PodHullMesh->SetupAttachment(PodSpringArm);
+	PodHullMesh->SetSimulatePhysics(false);
+	PodHullMesh->SetCollisionProfileName(UCollisionProfile::NoCollision_ProfileName);
+	PodHullMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 0.0f)); // Cockpit offset
+	PodHullMesh->SetRelativeScale3D(FVector(1.0f, 0.5f, 0.125f)); // Cockpit offset
+
 	// Set the PodVehicle to replicate itself over the network.
 	bReplicates = true;
 	// Ensures the vehicle's transform is replicated.

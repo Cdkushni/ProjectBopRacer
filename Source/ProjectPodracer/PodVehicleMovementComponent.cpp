@@ -55,6 +55,9 @@ UPodVehicleMovementComponent::UPodVehicleMovementComponent()
 	CorrectionThreshold = 10.0f; // Correct if discrepancy is more than 10cm
 	GravityScale = 980.0f; // Approx. 1G in cm/s^2 (Unreal's default gravity is -980 for Z axis)
 
+	// Visual config
+	AngleOfRoll = 30.0f;
+
 	MoveForwardInput = 0.0f;
 	TurnRightInput = 0.0f;
 	bIsBoosting = false;
@@ -140,6 +143,9 @@ void UPodVehicleMovementComponent::TickComponent(float DeltaTime, ELevelTick Tic
 	// For ROLE_SimulatedProxy (other clients on a client machine), this block is skipped.
 	// Their movement is purely driven by the replicated Velocity, CurrentAngularYawVelocity, and Transform from the server,
 	// with Unreal's built-in interpolation for smoothness via OnRep_ReplicatedMovement.
+
+	// TODO: For some reason its only working on local vehicle, not on remote vehicles
+	HandleEngineHoveringVisuals(SmoothedRudderInput, DeltaTime);
 }
 
 // Setter for MoveForwardInput. This is called by the owning APodVehicle.
@@ -203,7 +209,7 @@ void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, 
 	float DeltaTime = InDeltaTime;
 	if (DeltaTime <= 0.0f) return;
 
-	GroundNormal = FVector::UpVector;
+	FVector SimpleGroundNormal = FVector::UpVector;
 	float Height = 100.f;
 
 	FVector Start = OwningPodVehicle->GetRootComponent()->GetComponentLocation();
@@ -215,7 +221,7 @@ void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, 
 	if (GetWorld()->LineTraceSingleByChannel(HoverHitResult, Start, End, GroundCollisionChannel, QueryParams))
 	{
 		Height = HoverHitResult.Distance;
-		GroundNormal = HoverHitResult.Normal.GetSafeNormal();
+		SimpleGroundNormal = HoverHitResult.Normal.GetSafeNormal();
 	}
 
 	FVector ForwardVector = OwningPodVehicle->GetRootComponent()->GetForwardVector();
@@ -243,7 +249,7 @@ void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, 
 	// Interpolate perpendicular velocity toward zero
 	if (IsGrounded())
 	{
-		PerpendicularVelocity = FVector::VectorPlaneProject(PerpendicularVelocity, GroundNormal);
+		PerpendicularVelocity = FVector::VectorPlaneProject(PerpendicularVelocity, SimpleGroundNormal);
 		PerpendicularVelocity = FMath::VInterpTo(PerpendicularVelocity, FVector::ZeroVector, DeltaTime, DragCoefficient * ControlMultiplier);
 	} else
 	{
@@ -282,7 +288,7 @@ void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, 
 	// Clamp velocity
 	if (IsGrounded())
 	{
-		CurrentVelocity = FVector::VectorPlaneProject(CurrentVelocity, GroundNormal);
+		CurrentVelocity = FVector::VectorPlaneProject(CurrentVelocity, SimpleGroundNormal);
 		// Speed-based agility for steering
 		float SpeedMultiplier = FMath::GetMappedRangeValueClamped(
 			FVector2D(0.0f, MaxSpeed),
@@ -358,6 +364,35 @@ void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, 
 			InMoveForwardInput, InTurnRightInput, InIsBraking, InIsDrifting, InIsBoosting,
 			*CurrentVelocity.ToString(), *OutRotation.ToString(), (int32)GetOwner()->GetLocalRole());
 	}
+}
+
+void UPodVehicleMovementComponent::HandleEngineHoveringVisuals(float InTurnRightInput, float DeltaTime)
+{
+	GroundNormal = FVector::UpVector;
+    float Height = GroundDetectionRadius;
+
+    FVector Start = OwningPodVehicle->GetRootComponent()->GetComponentLocation();
+    FVector End = Start - OwningPodVehicle->GetActorUpVector() * GroundTraceDistance;
+    FHitResult HitResult;
+    FCollisionQueryParams QueryParams;
+    QueryParams.AddIgnoredActor(GetOwner());
+
+    if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, GroundCollisionChannel, QueryParams))
+    {
+        Height = HitResult.Distance;
+        GroundNormal = HitResult.Normal.GetSafeNormal();
+    }
+	// TODO: Do traces for the front, back and center points of the pod to get average normals for pitch rotation
+
+    float RollAngle = AngleOfRoll * -InTurnRightInput;
+    //FQuat BodyRotation = GetActorRotation().Quaternion() * FQuat(FVector(0, 0, 1), FMath::DegreesToRadians(RollAngle));
+    FRotator LookAtRotation = UKismetMathLibrary::FindLookAtRotation(OwningPodVehicle->PodHullMesh->GetComponentLocation(), OwningPodVehicle->EngineCenterPoint->GetComponentLocation());
+    FQuat CurrentBodyRotation = OwningPodVehicle->PodHullMesh->GetComponentQuat();
+    FQuat EngineRotation = OwningPodVehicle->GetActorRotation().Quaternion() * FQuat(FVector(1, 0, 0), FMath::DegreesToRadians(RollAngle));
+    FQuat CurrentEngineRotation = OwningPodVehicle->EngineCenterPoint->GetComponentQuat();
+    //HullMesh->SetWorldRotation(FMath::QInterpTo(CurrentBodyRotation, BodyRotation, DeltaTime, 5.0f));
+    OwningPodVehicle->PodHullMesh->SetWorldRotation(FMath::QInterpTo(CurrentBodyRotation, LookAtRotation.Quaternion(), DeltaTime, 5.0f));
+    OwningPodVehicle->EngineCenterPoint->SetWorldRotation(FMath::QInterpTo(CurrentEngineRotation, EngineRotation, DeltaTime, 5.0f));
 }
 
 // Implementation of the Server RPC for processing client moves.

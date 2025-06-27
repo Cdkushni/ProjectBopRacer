@@ -195,6 +195,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
 	float GravityScale;
 
+	// Visual Configuration
+
+	// Max angle of engine turn roll rotation
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
+	float AngleOfRoll;
+
 	UPROPERTY()
 	APodVehicle* OwningPodVehicle;
 
@@ -218,6 +224,8 @@ protected:
 	// This function will be called on the client for prediction and replay, and on the server for authority.
 	void ApplyMovementLogic(float InMoveForwardInput, float InTurnRightInput, bool InIsBoosting, bool InIsBraking, bool InIsDrifting, float InDeltaTime, FVector& OutVelocity, FRotator& OutRotation, float& OutAngularYawVelocity);
 
+	void HandleEngineHoveringVisuals(float InTurnRightInput, float DeltaTime);
+	
 	// Ground detection
 	bool IsGrounded() const;
 };
