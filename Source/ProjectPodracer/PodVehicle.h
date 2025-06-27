@@ -8,9 +8,9 @@
 #include "GameFramework/Pawn.h"
 #include "PodVehicle.generated.h"
 
-class UCapsuleComponent;
 // Forward declaration of our custom movement component
 class UPodVehicleMovementComponent;
+class UCapsuleComponent;
 
 UCLASS()
 class PROJECTPODRACER_API APodVehicle : public APawn
@@ -49,11 +49,13 @@ public:
 protected:
 	// Called when the game starts or when spawned
 	virtual void BeginPlay() override;
-	
+
+private:
 	// Our custom movement component that handles all pod movement logic.
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Movement", meta = (AllowPrivateAccess = "true"))
 	UPodVehicleMovementComponent* PodMovementComponent;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	// The main collider for the vehicle, using a CapsuleComponent
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	UCapsuleComponent* CapsuleComponent;
 };

@@ -21,7 +21,10 @@ APodVehicle::APodVehicle()
 	CapsuleComponent->SetCapsuleHalfHeight(100.0f); // Adjust size as needed
 	CapsuleComponent->SetCapsuleRadius(50.0f);
 	CapsuleComponent->SetCollisionProfileName(TEXT("Pawn")); // Use a common collision profile
-
+	// Physics simulation is NOT enabled on the CapsuleComponent for this custom movement.
+	CapsuleComponent->SetEnableGravity(false); // Gravity handled by movement component
+	CapsuleComponent->SetLinearDamping(0.0f); // Damping handled by movement component
+	CapsuleComponent->SetAngularDamping(0.0f); // Damping handled by movement component
 	// Create and attach the custom movement component
 	// Note: We specify our custom movement component here.
 	PodMovementComponent = CreateDefaultSubobject<UPodVehicleMovementComponent>(TEXT("PodMovementComponent"));

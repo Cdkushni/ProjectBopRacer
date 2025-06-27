@@ -109,55 +109,91 @@ public:
 	// --- Client RPC for Server Acknowledgment ---
 	// This RPC is called by the server to send authoritative state back to the owning client.
 	UFUNCTION(Client, Reliable)
-	void Client_AcknowledgeMove(uint32 LastProcessedMoveID, FVector ServerLocation, FRotator ServerRotation, FVector ServerVelocity);
+	void Client_AcknowledgeMove(uint32 LastProcessedMoveID, FVector ServerLocation, FRotator ServerRotation, FVector ServerVelocity, float ServerAngularYawVelocity);
+
 
 	// --- Vehicle Physics Parameters ---
-	// Maximum speed the pod can reach.
+	// Max linear speed (cm/s)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
 	float MaxSpeed;
-	// Acceleration rate of the pod.
+	// Linear acceleration rate (cm/s^2)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
 	float Acceleration;
-	// Deceleration rate when no forward input is applied.
+	// Deceleration rate when no forward input is applied (cm/s^2)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
 	float Deceleration;
+	// Linear damping (0-1, 1 means instant stop)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
+	float LinearDamping;
 	// Rate at which the pod can turn (degrees per second).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
 	float TurnSpeed;
-	// Amount of damping applied to linear velocity (friction/air resistance).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
-	float LinearDamping;
-	// Amount of damping applied to angular velocity (how quickly it stops rotating).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
+	// Max target angular velocity for turning (degrees/s)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Steering")
+	float MaxTurnRate;
+	// Angular acceleration for turning (degrees/s^2)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Steering")
+	float TurnAcceleration;
+	// Angular damping for turning (0-1, 1 means instant stop)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Steering")
 	float AngularDamping;
+	// Multiplier for steering at MaxSpeed (0 to 1, lower = less turn)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Steering")
+	float HighSpeedSteeringDampFactor;
+	// Speed for interpolating keyboard input to smoothed input
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Steering")
+	float KeyboardSteeringInterpSpeed;
+	// Speed for returning smoothed input to 0
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Steering")
+	float KeyboardSteeringReturnSpeed;
 
 	// Boost related parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Boost")
-	float BoostStrength; // Additional acceleration when boosting
+	float BoostAcceleration; // Additional acceleration when boosting (cm/s^2)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Boost")
 	float BoostMaxSpeedMultiplier; // Max speed multiplier when boosting
 
 	// Brake related parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Brake")
-	float BrakeForce; // Deceleration force when braking
+	float BrakeDeceleration; // Deceleration rate when braking (cm/s^2)
 
 	// Drift related parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
 	float DriftTurnSpeedMultiplier; // How much turn speed is multiplied when drifting
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
-	float DriftLinearDampingMultiplier; // How much linear damping is multiplied when drifting (less grip)
+	float DriftLinearDampingMultiplier; // Multiplier for linear damping when drifting (lower = more slide)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
-	float DriftAngularDampingMultiplier; // How much angular damping is multiplied when drifting (more slide)
-
-	// Threshold for position difference before a client correction occurs (e.g., in cm)
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Networking")
-	float CorrectionThreshold;
+	float DriftAngularDampingMultiplier; // Multiplier for angular damping when drifting (lower = sustains spin more)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
+	float DriftLateralSlideFactor; // How much lateral velocity is retained when drifting (0-1, 1 means no lateral friction)
 
 	// Air control parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|AirControl")
 	float AirControlTurnFactor; // How much TurnRightInput affects Yaw when airborne
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|AirControl")
-	float AirControlPitchFactor; // How much TurnRightInput (or MoveForwardInput) affects Pitch when airborne
+	float AirControlPitchFactor; // How much Forward/Backward input affects Pitch when airborne (e.g. for tilting)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|AirControl")
+	float AirControlRollFactor; // How much TurnRightInput affects Roll when airborne
+
+	// Air Resistance
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodRacer|Movement")
+	float DragCoefficient; // Interpolation speed for air resistance
+
+	// Ground detection parameters
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|GroundDetection")
+	float GroundTraceDistance; // How far down to trace for ground
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|GroundDetection")
+	float GroundDetectionRadius; // Radius for ground detection trace
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|GroundDetection")
+	TEnumAsByte<ECollisionChannel> GroundCollisionChannel; // Collision channel for ground trace
+
+	// Threshold for position difference before a client correction occurs (e.g., in cm)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Networking")
+	float CorrectionThreshold;
+
+	// Gravity applied when airborne
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement")
+	float GravityScale;
 
 	UPROPERTY()
 	APodVehicle* OwningPodVehicle;
@@ -171,10 +207,16 @@ protected:
 
 	// History of client-side moves for reconciliation.
 	TArray<FClientMoveData> ClientMoveHistory;
+	
+	// Smoothed rudder input for smoother steering, particularly for keyboard.
+	float SmoothedRudderInput;
+
+	FVector CurrentVelocity = FVector::ZeroVector;
+	FVector GroundNormal = FVector::UpVector;
 
 	// Helper function to apply movement logic for a given input.
 	// This function will be called on the client for prediction and replay, and on the server for authority.
-	void ApplyMovementLogic(float InMoveForwardInput, float InTurnRightInput, bool InIsBoosting, bool InIsBraking, bool InIsDrifting, float InDeltaTime, FVector& OutVelocity, FRotator& OutRotation, FVector& OutLocation, float& OutAngularYawVelocity);
+	void ApplyMovementLogic(float InMoveForwardInput, float InTurnRightInput, bool InIsBoosting, bool InIsBraking, bool InIsDrifting, float InDeltaTime, FVector& OutVelocity, FRotator& OutRotation, float& OutAngularYawVelocity);
 
 	// Ground detection
 	bool IsGrounded() const;
