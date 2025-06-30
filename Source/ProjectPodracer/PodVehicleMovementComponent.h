@@ -166,6 +166,16 @@ public:
 	float DriftAngularDampingMultiplier; // Multiplier for angular damping when drifting (lower = sustains spin more)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
 	float DriftLateralSlideFactor; // How much lateral velocity is retained when drifting (0-1, 1 means no lateral friction)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
+	float DriftOriginalVelocityBlend; // Blend factor for original direction (0.0 = no original velocity, 1.0 = full original velocity)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
+	float DriftLateralVelocityScale; // Scale for lateral drift velocity (tune for slide strength)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
+	float DriftBlendDecayRate; // Decay original blend per second (0.85 to 0.0 over ~2s)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
+	float DriftMinSlideFactor; // Minimum slide factor for indefinite drift
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
+	float DriftSidewaysTorque; // Sideways velocity magnitude (cm/s)
 
 	// Air control parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|AirControl")
@@ -219,6 +229,11 @@ protected:
 
 	FVector CurrentVelocity = FVector::ZeroVector;
 	FVector GroundNormal = FVector::UpVector;
+
+	// New variables for tracking drift state
+	bool bIsDriftingLastFrame = false; // Track if we were drifting last frame
+	FVector DriftOriginalVelocity = FVector::ZeroVector; // Store forward vector at drift start
+	float DriftDuration = 0.0f; // Track time since drift started
 
 	// Helper function to apply movement logic for a given input.
 	// This function will be called on the client for prediction and replay, and on the server for authority.

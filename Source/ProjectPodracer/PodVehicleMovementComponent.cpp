@@ -37,10 +37,13 @@ UPodVehicleMovementComponent::UPodVehicleMovementComponent()
 
 	BrakeDeceleration = 20000.0f; // Very strong braking deceleration
 
-	DriftTurnSpeedMultiplier = 1.5f; // 50% more turn speed while drifting
-	DriftLinearDampingMultiplier = 0.2f; // Much less forward damping for more slide
-	DriftAngularDampingMultiplier = 0.3f; // Less angular damping, sustains spin more
-	DriftLateralSlideFactor = 0.8f; // Retain 80% of lateral velocity, less sideways friction
+	DriftTurnSpeedMultiplier = 1.2f; // Match normal turn rate
+	DriftAngularDampingMultiplier = 0.6f; // Moderate damping for smooth yaw
+	DriftLateralSlideFactor = 0.7f; // Initial slide factor for forward bias
+	DriftLinearDampingMultiplier = 0.01f; // Near-zero damping to maintain speed
+	DriftBlendDecayRate = 0.7f; // Decay slide over ~1s
+	DriftMinSlideFactor = 0.3f; // Minimum slide factor for indefinite drift
+	DriftSidewaysTorque = 600.0f; // Sideways velocity magnitude (cm/s)
 
 	AirControlTurnFactor = 0.4f; // Weaker turn in air
 	AirControlPitchFactor = 0.6f; // Good pitch responsiveness in air
@@ -228,14 +231,77 @@ void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, 
 	float ControlMultiplier = IsGrounded() ? 1.0f : AirControlTurnFactor;
 	float EffectiveMaxSpeed = MaxSpeed * (InIsBoosting ? BoostMaxSpeedMultiplier : 1.0f);
 
-	// Apply rotation (yaw) from RudderInput
-	float EffectiveTurnRate = TurnSpeed * HighSpeedSteeringDampFactor * (InIsDrifting ? DriftTurnSpeedMultiplier : 1.0f);
-	float YawDelta = InTurnRightInput * EffectiveTurnRate * DeltaTime;
-	FRotator CurrentRotation = OwningPodVehicle->GetRootComponent()->GetComponentRotation();
-	//FRotator NewRotation = FRotator(CurrentRotation.Pitch, CurrentRotation.Yaw + YawDelta, CurrentRotation.Roll);
-	// TODO: Set rotation like this?
-	//OwningPodVehicle->GetRootComponent()->SetWorldRotation(NewRotation);
-	float CurrentTurnRate = MaxTurnRate;
+	// --- Track Drift State ---
+	if (InIsDrifting && !bIsDriftingLastFrame)
+	{
+		DriftOriginalVelocity = CurrentVelocity;
+		DriftDuration = 0.0f;
+		bIsDriftingLastFrame = true;
+		UE_LOG(LogTemp, Log, TEXT("Drift Started: OriginalVelocity=%s, Magnitude=%.3f"), *DriftOriginalVelocity.ToString(), DriftOriginalVelocity.Size());
+	}
+	else if (!InIsDrifting && bIsDriftingLastFrame)
+	{
+		// On drift exit, blend current velocity toward forward direction
+		float CurrentSpeed = CurrentVelocity.Size();
+		CurrentVelocity = FMath::Lerp(CurrentVelocity.GetSafeNormal(), ForwardVector, 0.7f) * CurrentSpeed;
+		bIsDriftingLastFrame = false;
+		DriftOriginalVelocity = FVector::ZeroVector;
+		DriftDuration = 0.0f;
+		UE_LOG(LogTemp, Log, TEXT("Drift Ended: CurrentVelocity=%s, Magnitude=%.3f"), *CurrentVelocity.ToString(), CurrentVelocity.Size());
+	}
+	else if (InIsDrifting)
+	{
+		DriftDuration += DeltaTime;
+	}
+
+	// --- Linear Damping (Friction/Air Resistance) ---
+	// Apply damping, adjusted for drifting and air control
+	float CurrentLinearDamping = LinearDamping;
+	if (InIsDrifting && IsGrounded())
+	{
+		CurrentLinearDamping *= DriftLinearDampingMultiplier; // Reduce forward friction for drifting
+	}
+	// We handle gravity separately, so air linear damping is minimal
+	CurrentVelocity *= FMath::Clamp(1.0f - CurrentLinearDamping * InDeltaTime, 0.0f, 1.0f);
+
+	// --- Lateral Drifting / Sideways Friction ---
+	if (IsGrounded())
+	{
+		// Calculate lateral velocity using FRotationMatrix for robust right vector
+		FVector RightVector = FRotationMatrix(OutRotation).GetUnitAxis(EAxis::Y);
+        FVector LateralVelocity = FVector::DotProduct(CurrentVelocity, RightVector) * RightVector;
+
+        float CurrentDriftLateralSlideFactor = InIsDrifting ? DriftLateralSlideFactor : 0.0f;
+		
+		// Reduce lateral velocity more gradually for drifting
+		float LateralDamping = InIsDrifting ? 0.02f : 20.0f; // Lower damping for drifting
+		CurrentVelocity -= LateralVelocity * (1.0f - CurrentDriftLateralSlideFactor) * FMath::Clamp(LateralDamping * InDeltaTime, 0.0f, 1.0f);
+
+		// Ensure that if not drifting, lateral velocity is aggressively killed.
+		if (!InIsDrifting && LateralVelocity.SizeSquared() > KINDA_SMALL_NUMBER)
+		{
+			// Aggressively remove sideways velocity when not drifting
+			CurrentVelocity -= LateralVelocity * FMath::Clamp(20.0f * InDeltaTime, 0.0f, 1.0f);
+		}
+
+		// Log lateral velocity for debugging
+		UE_LOG(LogTemp, Log, TEXT("LateralVelocity: %s, Magnitude: %.3f, DriftLateralSlideFactor: %.3f, LateralDamping: %.3f"),
+			   *LateralVelocity.ToString(), LateralVelocity.Size(), CurrentDriftLateralSlideFactor, LateralDamping);
+	}
+	
+	// --- Max Speed Limit ---
+	float CurrentMaxSpeed = MaxSpeed;
+	if (InIsBoosting)
+	{
+		CurrentMaxSpeed *= BoostMaxSpeedMultiplier;
+	}
+	if (CurrentVelocity.SizeSquared() > FMath::Square(CurrentMaxSpeed))
+	{
+		CurrentVelocity = CurrentVelocity.GetSafeNormal() * CurrentMaxSpeed;
+	}
+	
+	// --- Angular Movement (Steering, Drifting, Air Control) ---
+	float CurrentTurnRate = MaxTurnRate; // Max degrees/s target for yaw velocity
 	float CurrentAngularAcceleration = TurnAcceleration;
 	float CurrentAngularDamping = AngularDamping;
 
@@ -285,23 +351,55 @@ void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, 
 		CurrentVelocity += AccelerationVector * DeltaTime;
 	}
 
-	// Clamp velocity
+	// --- Drifting and Steering ---
 	if (IsGrounded())
 	{
-		CurrentVelocity = FVector::VectorPlaneProject(CurrentVelocity, SimpleGroundNormal);
+		//TODO: CurrentVelocity = FVector::VectorPlaneProject(CurrentVelocity, SimpleGroundNormal);
 		// Speed-based agility for steering
 		float SpeedMultiplier = FMath::GetMappedRangeValueClamped(
 			FVector2D(0.0f, MaxSpeed),
 			FVector2D(1.0f, HighSpeedSteeringDampFactor),
-			OutVelocity.Size() // Use magnitude of velocity for general speed dampening
+			CurrentVelocity.Size() // Use magnitude of velocity for general speed dampening
 		);
 		
 		CurrentTurnRate *= SpeedMultiplier;
 		
 		if (InIsDrifting)
 		{
-			CurrentTurnRate *= DriftTurnSpeedMultiplier;
-			CurrentAngularDamping *= DriftAngularDampingMultiplier;
+			// Reduce turn rate for classic drifting (less sharp turning)
+			CurrentTurnRate *= DriftTurnSpeedMultiplier; // Adjust this multiplier (e.g., 0.3f to 0.7f) for desired drift turn rate
+			CurrentAngularDamping *= DriftAngularDampingMultiplier; // Reduce damping for smoother yaw persistence
+			CurrentAngularAcceleration *= 0.9f; // Slower yaw acceleration for smoother drift yaw changes
+
+			// Blend original velocity with lateral drift
+			if (!DriftOriginalVelocity.IsNearlyZero())
+			{
+				float CurrentDriftFactor = FMath::Max(DriftMinSlideFactor, DriftLateralSlideFactor - DriftBlendDecayRate * DriftDuration);
+
+				// Use current speed to prevent acceleration
+				float TotalSpeed = CurrentVelocity.Size();
+				float ForwardSpeed = TotalSpeed * FMath::Max(InMoveForwardInput, 0.8f) * (1.0f - CurrentDriftFactor);
+				ForwardVelocity = ForwardVector * ForwardSpeed;
+
+				float OriginalSpeed = DriftOriginalVelocity.Size() * CurrentDriftFactor;
+				FVector OriginalDirection = DriftOriginalVelocity.GetSafeNormal();
+				FVector SlideVelocity = OriginalDirection * OriginalSpeed;
+
+				FVector RightVector = FRotationMatrix(OutRotation).GetUnitAxis(EAxis::Y);
+				float SidewaysSpeed = TotalSpeed * (DriftSidewaysTorque / EffectiveMaxSpeed) * FMath::Abs(InTurnRightInput);
+				FVector SidewaysVelocity = RightVector * SidewaysSpeed * FMath::Sign(InTurnRightInput);
+
+				CurrentVelocity = ForwardVelocity + SlideVelocity + SidewaysVelocity;
+
+				if (CurrentVelocity.SizeSquared() > FMath::Square(CurrentMaxSpeed))
+				{
+					CurrentVelocity = CurrentVelocity.GetSafeNormal() * CurrentMaxSpeed;
+				}
+
+				UE_LOG(LogTemp, Log, TEXT("Drift: ForwardVelocity=%s (%.3f), SlideVelocity=%s (%.3f), SidewaysVelocity=%s (%.3f), CurrentVelocity=%s (%.3f), DriftFactor=%.3f"),
+					   *ForwardVelocity.ToString(), ForwardVelocity.Size(), *SlideVelocity.ToString(), SlideVelocity.Size(),
+					   *SidewaysVelocity.ToString(), SidewaysVelocity.Size(), *CurrentVelocity.ToString(), CurrentVelocity.Size(), CurrentDriftFactor);
+			}
 		}
 
 		// Calculate target angular velocity based on input and adjusted turn rate
@@ -313,6 +411,10 @@ void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, 
 		
 		// Apply angular damping
 		OutAngularYawVelocity *= FMath::Clamp(1.0f - CurrentAngularDamping * InDeltaTime, 0.0f, 1.0f);
+
+		// Log angular values for debugging
+		UE_LOG(LogTemp, Log, TEXT("TurnRate: %.3f, AngularDamping: %.3f, AngularAcceleration: %.3f, AngularYawVelocity: %.3f, IsDrifting: %d"),
+			   CurrentTurnRate, CurrentAngularDamping, CurrentAngularAcceleration, OutAngularYawVelocity, InIsDrifting);
 	}
 	else // Airborne Control
 	{
