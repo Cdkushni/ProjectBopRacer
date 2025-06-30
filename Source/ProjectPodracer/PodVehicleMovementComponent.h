@@ -224,6 +224,9 @@ protected:
 	// This function will be called on the client for prediction and replay, and on the server for authority.
 	void ApplyMovementLogic(float InMoveForwardInput, float InTurnRightInput, bool InIsBoosting, bool InIsBraking, bool InIsDrifting, float InDeltaTime, FVector& OutVelocity, FRotator& OutRotation, float& OutAngularYawVelocity);
 
+	FHitResult HoverLineTrace(FVector StartLocation, float TraceDistance, FCollisionQueryParams QueryParams);
+	FVector HoverLineTraceNormal(FVector StartLocation, float TraceDistance, FCollisionQueryParams QueryParams);
+	void AdjustVehiclePitch(float DeltaTime);
 	void HandleEngineHoveringVisuals(float InTurnRightInput, float DeltaTime);
 	
 	// Ground detection

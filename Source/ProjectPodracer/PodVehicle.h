@@ -54,6 +54,8 @@ protected:
 public:
 	// Display components
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Components")
+	USceneComponent* VehicleCenterRoot;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Components")
 	USceneComponent* EngineCenterPoint;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Components")
 	USceneComponent* LeftEngineRoot;

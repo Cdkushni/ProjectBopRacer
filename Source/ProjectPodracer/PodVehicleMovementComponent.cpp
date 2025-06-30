@@ -366,33 +366,227 @@ void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, 
 	}
 }
 
+FHitResult UPodVehicleMovementComponent::HoverLineTrace(FVector StartLocation, float TraceDistance,
+	FCollisionQueryParams QueryParams)
+{
+	FVector End = StartLocation - OwningPodVehicle->GetActorUpVector() * TraceDistance;
+	FHitResult HitResult;
+	if (GetWorld()->LineTraceSingleByChannel(HitResult, StartLocation, End, GroundCollisionChannel, QueryParams))
+	{
+		return HitResult;
+	}
+	return HitResult;
+}
+
+FVector UPodVehicleMovementComponent::HoverLineTraceNormal(FVector StartLocation, float TraceDistance,
+	FCollisionQueryParams QueryParams)
+{
+	FVector Start = StartLocation + FVector(0, 0, 100);
+	FVector End = StartLocation - OwningPodVehicle->GetActorUpVector() * TraceDistance;
+	FHitResult HitResult;
+	if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, GroundCollisionChannel, QueryParams))
+	{
+		return HitResult.Normal;
+	}
+	return OwningPodVehicle->GetActorUpVector();
+}
+
+void UPodVehicleMovementComponent::AdjustVehiclePitch(float DeltaTime)
+{
+	// Ensure the vehicle and components are valid
+    if (!OwningPodVehicle->VehicleCenterRoot || !GetWorld()) return;
+
+    // Parameters for line traces
+    const float TraceLength = 1000.0f; // Max distance to trace downward (adjust as needed)
+    const float TraceOffset = 100.0f;  // Distance from center to front/back trace start points (adjust to vehicle size)
+    FVector ForwardVector = OwningPodVehicle->VehicleCenterRoot->GetForwardVector();
+    FVector DownVector = -FVector::UpVector; // Downward direction (world Z)
+
+    // Start points for front and back line traces (relative to VehicleCenterRoot)
+    //FVector FrontTraceStart = OwningPodVehicle->VehicleCenterRoot->GetComponentLocation() + ForwardVector * TraceOffset;
+	FVector FrontLeftTraceStart = OwningPodVehicle->LeftEngineRoot->GetComponentLocation() + FVector(0, 0, 100);
+	FVector FrontRightTraceStart = OwningPodVehicle->RightEngineRoot->GetComponentLocation() + FVector(0, 0, 100);
+    FVector BackTraceStart = OwningPodVehicle->VehicleCenterRoot->GetComponentLocation() - ForwardVector * TraceOffset;
+    FVector FrontLeftTraceEnd = FrontLeftTraceStart + DownVector * TraceLength;
+    FVector FrontRightTraceEnd = FrontRightTraceStart + DownVector * TraceLength;
+    FVector BackTraceEnd = BackTraceStart + DownVector * TraceLength;
+
+    // Line trace parameters
+    FHitResult FrontLeftHit;
+    FHitResult FrontRightHit;
+    FHitResult BackHit;
+    FCollisionQueryParams QueryParams;
+    QueryParams.AddIgnoredActor(OwningPodVehicle); // Ignore the vehicle itself
+    ECollisionChannel TraceChannel = ECC_WorldStatic; // Adjust to your ground collision channel
+
+    // Perform line traces
+    bool bFrontLeftHit = GetWorld()->LineTraceSingleByChannel(FrontLeftHit, FrontLeftTraceStart, FrontLeftTraceEnd, TraceChannel, QueryParams);
+    bool bFrontRightHit = GetWorld()->LineTraceSingleByChannel(FrontRightHit, FrontRightTraceStart, FrontRightTraceEnd, TraceChannel, QueryParams);
+    bool bBackHit = GetWorld()->LineTraceSingleByChannel(BackHit, BackTraceStart, BackTraceEnd, TraceChannel, QueryParams);
+
+    // Default pitch when airborne
+    float TargetPitch = 0.0f;
+    const float MaxAirbornePitch = -50.0f; // Max downward pitch when airborne (adjust as needed)
+
+	if (bFrontLeftHit && bFrontRightHit && bBackHit)
+	{
+		// All traces hit: calculate pitch using average front height
+		FVector FrontLeftHitPoint = FrontLeftHit.Location;
+		FVector FrontRightHitPoint = FrontRightHit.Location;
+		FVector BackHitPoint = BackHit.Location;
+		FVector AverageFrontPoint = (FrontLeftHitPoint + FrontRightHitPoint) / 2.0f;
+		FVector SlopeVector = AverageFrontPoint - BackHitPoint;
+		TargetPitch = FMath::Atan2(SlopeVector.Z, SlopeVector.Size2D()) * FMath::RadiansToDegrees(SlopeVector.Z);
+	}
+	else if (!bFrontLeftHit && !bFrontRightHit && !bBackHit)
+	{
+		// Fully airborne: apply full downward pitch
+		TargetPitch = MaxAirbornePitch;
+	}
+	else if ((bFrontLeftHit || bFrontRightHit) && !bBackHit)
+	{
+		// At least one front hit, back airborne: partial downward pitch
+		TargetPitch = MaxAirbornePitch * 0.5f; // Adjust multiplier as needed
+	}
+	else if (!bFrontLeftHit && !bFrontRightHit && bBackHit)
+	{
+		// Back grounded, both fronts airborne: full downward pitch
+		TargetPitch = MaxAirbornePitch;
+	}
+	else if (bFrontLeftHit != bFrontRightHit)
+	{
+		// One front hits, other doesn't: use partial pitch (slight tilt)
+		TargetPitch = MaxAirbornePitch * 0.3f; // Adjust for uneven front
+	}
+
+	// Clamp pitch to prevent extreme angles
+	TargetPitch = FMath::Clamp(TargetPitch, -45.0f, 45.0f);
+
+	// Get current relative rotation of VehicleCenterRoot
+	FRotator CurrentRelativeRotation = OwningPodVehicle->VehicleCenterRoot->GetRelativeRotation();
+	FRotator TargetRelativeRotation = FRotator(TargetPitch, CurrentRelativeRotation.Yaw, CurrentRelativeRotation.Roll);
+
+	// Smoothly interpolate to the target rotation
+	FRotator InterpolatedRotation = FMath::RInterpTo(CurrentRelativeRotation, TargetRelativeRotation, DeltaTime, 5.0f);
+	OwningPodVehicle->VehicleCenterRoot->SetRelativeRotation(InterpolatedRotation);
+
+	if (false)
+	{
+		// Optional: Debug visualization
+		DrawDebugLine(GetWorld(), FrontLeftTraceStart, FrontLeftTraceEnd, bFrontLeftHit ? FColor::Green : FColor::Red, false, 0.1f);
+		DrawDebugLine(GetWorld(), FrontRightTraceStart, FrontRightTraceEnd, bFrontRightHit ? FColor::Green : FColor::Red, false, 0.1f);
+		DrawDebugLine(GetWorld(), BackTraceStart, BackTraceEnd, bBackHit ? FColor::Green : FColor::Red, false, 0.1f);
+	}
+}
+
 void UPodVehicleMovementComponent::HandleEngineHoveringVisuals(float InTurnRightInput, float DeltaTime)
 {
-	GroundNormal = FVector::UpVector;
-    float Height = GroundDetectionRadius;
-
-    FVector Start = OwningPodVehicle->GetRootComponent()->GetComponentLocation();
-    FVector End = Start - OwningPodVehicle->GetActorUpVector() * GroundTraceDistance;
-    FHitResult HitResult;
-    FCollisionQueryParams QueryParams;
-    QueryParams.AddIgnoredActor(GetOwner());
-
-    if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, GroundCollisionChannel, QueryParams))
-    {
-        Height = HitResult.Distance;
-        GroundNormal = HitResult.Normal.GetSafeNormal();
-    }
-	// TODO: Do traces for the front, back and center points of the pod to get average normals for pitch rotation
-
-    float RollAngle = AngleOfRoll * -InTurnRightInput;
+	float RollAngle = AngleOfRoll * -InTurnRightInput;
     //FQuat BodyRotation = GetActorRotation().Quaternion() * FQuat(FVector(0, 0, 1), FMath::DegreesToRadians(RollAngle));
+	/*
     FRotator LookAtRotation = UKismetMathLibrary::FindLookAtRotation(OwningPodVehicle->PodHullMesh->GetComponentLocation(), OwningPodVehicle->EngineCenterPoint->GetComponentLocation());
     FQuat CurrentBodyRotation = OwningPodVehicle->PodHullMesh->GetComponentQuat();
     FQuat EngineRotation = OwningPodVehicle->GetActorRotation().Quaternion() * FQuat(FVector(1, 0, 0), FMath::DegreesToRadians(RollAngle));
     FQuat CurrentEngineRotation = OwningPodVehicle->EngineCenterPoint->GetComponentQuat();
-    //HullMesh->SetWorldRotation(FMath::QInterpTo(CurrentBodyRotation, BodyRotation, DeltaTime, 5.0f));
-    OwningPodVehicle->PodHullMesh->SetWorldRotation(FMath::QInterpTo(CurrentBodyRotation, LookAtRotation.Quaternion(), DeltaTime, 5.0f));
     OwningPodVehicle->EngineCenterPoint->SetWorldRotation(FMath::QInterpTo(CurrentEngineRotation, EngineRotation, DeltaTime, 5.0f));
+	OwningPodVehicle->PodHullMesh->SetWorldRotation(FMath::QInterpTo(CurrentBodyRotation, LookAtRotation.Quaternion(), DeltaTime, 5.0f));
+    */
+	// Calculate the target relative rotation (roll only) for the EngineCenterPoint
+	FRotator TargetRelativeRotation(0.0f, 0.0f, -RollAngle); // Roll is Z-axis in Unreal's rotator
+	FQuat TargetRelativeQuat = TargetRelativeRotation.Quaternion();
+
+	// Get the current relative rotation of the EngineCenterPoint
+	FQuat CurrentRelativeQuat = OwningPodVehicle->EngineCenterPoint->GetRelativeRotation().Quaternion();
+
+	// Interpolate between the current and target relative rotations
+	FQuat InterpolatedQuat = FMath::QInterpTo(CurrentRelativeQuat, TargetRelativeQuat, DeltaTime, 5.0f);
+
+	// Apply the interpolated rotation as a relative rotation
+	OwningPodVehicle->EngineCenterPoint->SetRelativeRotation(InterpolatedQuat);
+
+	AdjustVehiclePitch(DeltaTime);
+
+	/*
+	GroundNormal = FVector::UpVector;
+	float Height = GroundDetectionRadius;
+	FVector PodUpVector = OwningPodVehicle->GetActorUpVector();
+
+	FVector Start = OwningPodVehicle->GetRootComponent()->GetComponentLocation();
+	FVector End = Start - OwningPodVehicle->GetActorUpVector() * GroundTraceDistance;
+	FHitResult HitResult;
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(GetOwner());
+
+	if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, GroundCollisionChannel, QueryParams))
+	{
+		Height = HitResult.Distance;
+		GroundNormal = HitResult.Normal.GetSafeNormal();
+	}
+	// TODO: Do traces for the front, back and center points of the pod to get average normals for pitch rotation
+	FVector LeftHit = HoverLineTraceNormal(OwningPodVehicle->LeftEngineRoot->GetComponentLocation(), GroundTraceDistance, QueryParams);
+	FVector RightHit = HoverLineTraceNormal(OwningPodVehicle->RightEngineRoot->GetComponentLocation(), GroundTraceDistance, QueryParams);
+	FVector PodHit = HoverLineTraceNormal(OwningPodVehicle->PodHullMesh->GetComponentLocation(), GroundTraceDistance, QueryParams);
+	//GroundNormal = (LeftHit.bBlockingHit)?LeftHit.Normal:PodUpVector + (RightHit.bBlockingHit)?RightHit.Normal:PodUpVector + (PodHit.bBlockingHit)?PodHit.Normal:PodUpVector;
+	GroundNormal = LeftHit + RightHit + PodHit;
+	GroundNormal /= 3.0f;
+	GroundNormal = GroundNormal.GetSafeNormal();
+
+	if (GroundNormal.IsNearlyZero())
+	{
+		return;
+	}
+	//FQuat NewRotation = FQuat::FindBetweenNormals(FVector::UpVector, GroundNormal);
+	FVector CurrentForward = OwningPodVehicle->GetActorForwardVector();
+	FQuat CurrentRotation = OwningPodVehicle->EngineCenterPoint->GetComponentRotation().Quaternion();
+	FRotator CurrentRotator = CurrentRotation.Rotator();
+	float CurrentYaw = CurrentRotator.Yaw;
+	// Compute the rotation that aligns the world up (0,0,1) with the new up vector
+	FQuat AlignUpRotation = FQuat::FindBetweenNormals(FVector::UpVector, GroundNormal);
+	// Apply the yaw from the current rotation
+	// Create a yaw-only rotation (around world Z-axis)
+	FQuat YawRotation = FQuat(FVector::UpVector, FMath::DegreesToRadians(CurrentYaw));
+	// Combine the alignment rotation with the yaw rotation
+	FQuat NewRotation = AlignUpRotation * YawRotation;
+	OwningPodVehicle->EngineCenterPoint->SetWorldRotation(NewRotation);
+	*/
+	/*
+	// Optionally, preserve the forward direction as much as possible
+	// Project the current forward vector onto the plane perpendicular to the new up vector
+	FVector AdjustedForward = CurrentForward - FVector::DotProduct(CurrentForward, GroundNormal) * GroundNormal;
+	// Check if the adjusted forward vector is valid (non-zero)
+	if (AdjustedForward.IsNearlyZero())
+	{
+		// If the forward vector is parallel to the up vector, find an arbitrary perpendicular vector
+		AdjustedForward = FVector::CrossProduct(GroundNormal, FVector(GroundNormal.Y, GroundNormal.Z, GroundNormal.X));
+		if (AdjustedForward.IsNearlyZero())
+		{
+			// If the cross product is zero (e.g., up vector is along (1,1,1)), try another vector
+			AdjustedForward = FVector::CrossProduct(GroundNormal, FVector(GroundNormal.Z, GroundNormal.X, GroundNormal.Y));
+		}
+	}
+	AdjustedForward.Normalize();
+
+	// Compute the right vector to form a complete coordinate system
+	FVector RightVector = FVector::CrossProduct(GroundNormal, AdjustedForward);
+	RightVector.Normalize();
+
+	// Recompute the forward vector to ensure orthogonality
+	AdjustedForward = FVector::CrossProduct(RightVector, GroundNormal);
+	AdjustedForward.Normalize();
+
+	// Create a rotation matrix from the basis vectors (Right, Forward, Up)
+	FMatrix RotationMatrix;
+	RotationMatrix.SetAxis(0, RightVector);   // X-axis (Right)
+	RotationMatrix.SetAxis(1, AdjustedForward); // Y-axis (Forward)
+	RotationMatrix.SetAxis(2, GroundNormal);   // Z-axis (Up)
+	RotationMatrix.SetAxis(3, FVector::ZeroVector); // Translation (none)
+
+	// Convert the matrix to a quaternion
+	FQuat NewRotation = RotationMatrix.ToQuat();
+
+	// Apply the rotation to the actor
+	OwningPodVehicle->SetActorRotation(NewRotation);
+	*/
 }
 
 // Implementation of the Server RPC for processing client moves.

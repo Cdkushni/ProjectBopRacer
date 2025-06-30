@@ -30,8 +30,11 @@ APodVehicle::APodVehicle()
 	PodMovementComponent = CreateDefaultSubobject<UPodVehicleMovementComponent>(TEXT("PodMovementComponent"));
 	PodMovementComponent->UpdatedComponent = RootComponent; // Tell the movement component what to move
 
+	VehicleCenterRoot = CreateDefaultSubobject<USceneComponent>(TEXT("VehicleCenterRoot"));
+	VehicleCenterRoot->SetupAttachment(RootComponent);
+
 	EngineCenterPoint = CreateDefaultSubobject<USceneComponent>(TEXT("EngineCenterPoint"));
-	EngineCenterPoint->SetupAttachment(RootComponent);
+	EngineCenterPoint->SetupAttachment(VehicleCenterRoot);
 
 	LeftEngineRoot = CreateDefaultSubobject<USceneComponent>(TEXT("LeftEngineRoot"));
 	LeftEngineRoot->SetupAttachment(EngineCenterPoint);
@@ -42,7 +45,7 @@ APodVehicle::APodVehicle()
 	RightEngineRoot->SetRelativeLocation(FVector(200.f, 100.f, 0.f));
 
 	PodSpringArm = CreateDefaultSubobject<USpringArmComponent>(TEXT("PodSpringArm"));
-	PodSpringArm->SetupAttachment(RootComponent);
+	PodSpringArm->SetupAttachment(EngineCenterPoint);
 	PodSpringArm->TargetArmLength = 600.0f;
 	PodSpringArm->SocketOffset = FVector(0, 0, 0.f);
 	PodSpringArm->bUsePawnControlRotation = false;
