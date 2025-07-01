@@ -131,6 +131,8 @@ public:
 	// Max target angular velocity for turning (degrees/s)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Steering")
 	float MaxTurnRate;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle")
+	float MaxSteeringAngle = 45.0f; // Max steering angle in degrees (PI/4 radians in p5.js)
 	// Angular acceleration for turning (degrees/s^2)
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Steering")
 	float TurnAcceleration;
@@ -146,6 +148,13 @@ public:
 	// Speed for returning smoothed input to 0
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Steering")
 	float KeyboardSteeringReturnSpeed;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle")
+	float Friction = 0.99f; // Friction coefficient (0.95 to 1 in p5.js)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle")
+	bool bPowerSteering = true; // Auto-recenter steering (like powerSteering in p5.js)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Vehicle")
+	bool bAlignToGround = true; // Project movement onto ground plane
 
 	// Boost related parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Boost")
@@ -176,6 +185,21 @@ public:
 	float DriftMinSlideFactor; // Minimum slide factor for indefinite drift
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
 	float DriftSidewaysTorque; // Sideways velocity magnitude (cm/s)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
+	float DriftMomentumDecayRate; // New: How quickly the lateral momentum decays during drift (lower = longer slide)
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
+	float DriftLateralContributionScale; // New: Scales how much CurrentLateralMomentum adds to OutVelocity
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|Drift")
+	float DriftLateralMomentumMax; // New: Maximum magnitude for CurrentLateralMomentum
+
+	// New drift parameters
+	float DriftWheelbase = 150.0f; // Vehicle length (cm), like car.d
+	float DriftWidth = 80.0f; // Vehicle width (cm), like car.w
+	float DriftMaxWheelAngle = PI / 4.0f; // Max front wheel angle (radians, ±45°)
+	float DriftIntensity = 1.0f; // Scales drift factor, like params.drift
+	float DriftFriction = 0.99f; // Momentum decay, like params.friction
+	float DriftMomentumScale = 0.2f; // Momentum accumulation rate
+	float DriftSpeedFriction = 0.995f; // Speed decay during drift
 
 	// Air control parameters
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "PodMovement|AirControl")
@@ -230,10 +254,25 @@ protected:
 	FVector CurrentVelocity = FVector::ZeroVector;
 	FVector GroundNormal = FVector::UpVector;
 
+	// Vehicle state
+	float SteeringAngle = 0.0f; // Current steering angle (phi in p5.js, radians)
+	//float Speed = 100.0f; // Current speed (cm/s, equivalent to speed * 100)
+	FVector Momentum = FVector::ZeroVector; // Lateral momentum for drifting
+	float DriftWheelAngle = 0.0f; // Current front wheel angle (radians)
+
 	// New variables for tracking drift state
 	bool bIsDriftingLastFrame = false; // Track if we were drifting last frame
 	FVector DriftOriginalVelocity = FVector::ZeroVector; // Store forward vector at drift start
 	float DriftDuration = 0.0f; // Track time since drift started
+	UPROPERTY(Transient, Replicated)
+	FVector CurrentLateralMomentum = FVector::ZeroVector; // New: For Mario Kart style sustained sideways drift
+
+	float VehicleLength = 300.0f; // Distance between Engines and Pod (cm)
+	float VehicleWidth = 150.0f; // Width between Engines (cm)
+
+	float MomentumScale = 1.0f;
+	float DriftFactor = 1.0f;
+
 
 	// Helper function to apply movement logic for a given input.
 	// This function will be called on the client for prediction and replay, and on the server for authority.

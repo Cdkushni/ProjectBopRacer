@@ -37,13 +37,18 @@ UPodVehicleMovementComponent::UPodVehicleMovementComponent()
 
 	BrakeDeceleration = 20000.0f; // Very strong braking deceleration
 
-	DriftTurnSpeedMultiplier = 1.2f; // Match normal turn rate
-	DriftAngularDampingMultiplier = 0.6f; // Moderate damping for smooth yaw
-	DriftLateralSlideFactor = 0.7f; // Initial slide factor for forward bias
-	DriftLinearDampingMultiplier = 0.01f; // Near-zero damping to maintain speed
-	DriftBlendDecayRate = 0.7f; // Decay slide over ~1s
-	DriftMinSlideFactor = 0.3f; // Minimum slide factor for indefinite drift
-	DriftSidewaysTorque = 600.0f; // Sideways velocity magnitude (cm/s)
+	DriftTurnSpeedMultiplier = 1.5f; // Double turn speed while drifting
+	DriftLinearDampingMultiplier = 0.05f; // Very low linear damping for max slide
+	DriftAngularDampingMultiplier = 0.2f; // Very low angular damping, sustains spin much more
+	DriftLateralSlideFactor = 0.9f; // Retain 90% of lateral velocity (very slippery) - used for blend in old logic
+	DriftMinSlideFactor = 0.3f; // Ensures a minimum amount of slide even at low speed
+	DriftBlendDecayRate = 0.5f; // How fast the blend factor decays during a drift (old logic)
+	DriftSidewaysTorque = 1000.0f; // Used for lateral speed contribution during drift (conceptual torque) (old logic)
+
+	// New Drift Parameters for Mario Kart style
+	DriftMomentumDecayRate = 0.05f; // Very low decay rate for sustained sideways momentum (lower = longer slide)
+	DriftLateralContributionScale = 0.05f; // How much CurrentLateralMomentum adds to OutVelocity
+	DriftLateralMomentumMax = 5000.0f; // Max magnitude for CurrentLateralMomentum
 
 	AirControlTurnFactor = 0.4f; // Weaker turn in air
 	AirControlPitchFactor = 0.6f; // Good pitch responsiveness in air
@@ -538,6 +543,7 @@ void UPodVehicleMovementComponent::AdjustVehiclePitch(float DeltaTime)
 		FVector BackHitPoint = BackHit.Location;
 		FVector AverageFrontPoint = (FrontLeftHitPoint + FrontRightHitPoint) / 2.0f;
 		FVector SlopeVector = AverageFrontPoint - BackHitPoint;
+		SlopeVector = SlopeVector.GetSafeNormal();
 		TargetPitch = FMath::Atan2(SlopeVector.Z, SlopeVector.Size2D()) * FMath::RadiansToDegrees(SlopeVector.Z);
 	}
 	else if (!bFrontLeftHit && !bFrontRightHit && !bBackHit)
