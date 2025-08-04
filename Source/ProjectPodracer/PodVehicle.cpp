@@ -1,4 +1,5 @@
-﻿// This file implements the PodVehicle class, including its constructor,
+﻿// PodVehicle.cpp
+// This file implements the PodVehicle class, including its constructor,
 // input binding, and replication setup.
 
 #include "PodVehicle.h"
@@ -69,8 +70,8 @@ APodVehicle::APodVehicle()
 	// Recommended for Pawns/Characters in multiplayer for better prediction/smoothing
 	// Client receives updates from the server and tries to predict movement.
 	// Server is always authoritative.
-	SetNetUpdateFrequency(30.0f); // How often the server sends updates for this actor (Hz)
-	SetMinNetUpdateFrequency(5.0f); // Minimum update frequency
+	SetNetUpdateFrequency(60.0f); // Increased for smoother remote vehicles (Hz)
+	SetMinNetUpdateFrequency(10.0f); // Minimum update frequency
 }
 
 // Called when the game starts or when spawned
@@ -112,7 +113,6 @@ void APodVehicle::SetupPlayerInputComponent(UInputComponent* PlayerInputComponen
 // Handles input for accelerating the pod forward.
 void APodVehicle::MoveForward(float Value)
 {
-	// Only apply input if our movement component is valid.
 	if (PodMovementComponent)
 	{
 		PodMovementComponent->SetMoveForwardInput(Value);
@@ -122,7 +122,6 @@ void APodVehicle::MoveForward(float Value)
 // Handles input for steering the pod left/right.
 void APodVehicle::TurnRight(float Value)
 {
-	// Only apply input if our movement component is valid.
 	if (PodMovementComponent)
 	{
 		PodMovementComponent->SetTurnRightInput(Value);

@@ -1,4 +1,5 @@
-﻿// This file implements the core movement and networking logic for the PodVehicle.
+﻿// PodVehicleMovementComponent.cpp
+// This file implements the core movement and networking logic for the PodVehicle.
 
 #include "PodVehicleMovementComponent.h"
 
@@ -40,28 +41,26 @@ UPodVehicleMovementComponent::UPodVehicleMovementComponent()
 	DriftTurnSpeedMultiplier = 1.5f; // Double turn speed while drifting
 	DriftLinearDampingMultiplier = 0.05f; // Very low linear damping for max slide
 	DriftAngularDampingMultiplier = 0.2f; // Very low angular damping, sustains spin much more
-	DriftLateralSlideFactor = 0.9f; // Retain 90% of lateral velocity (very slippery) - used for blend in old logic
+	DriftLateralSlideFactor = 0.9f; // Retain 90% of lateral velocity (very slippery)
 	DriftMinSlideFactor = 0.3f; // Ensures a minimum amount of slide even at low speed
-	DriftBlendDecayRate = 0.5f; // How fast the blend factor decays during a drift (old logic)
-	DriftSidewaysTorque = 1000.0f; // Used for lateral speed contribution during drift (conceptual torque) (old logic)
 
-	// New Drift Parameters for Mario Kart style
-	DriftMomentumDecayRate = 0.05f; // Very low decay rate for sustained sideways momentum (lower = longer slide)
-	DriftLateralContributionScale = 0.05f; // How much CurrentLateralMomentum adds to OutVelocity
-	DriftLateralMomentumMax = 5000.0f; // Max magnitude for CurrentLateralMomentum
+	// Simplified Mario Kart style drifting parameters
+	DriftMomentumDecayRate = 0.05f; // Low decay for sustained slide
+	DriftLateralContributionScale = 0.05f; // Contribution of lateral momentum to velocity
+	DriftLateralMomentumMax = 5000.0f; // Max lateral momentum magnitude
 
 	AirControlTurnFactor = 0.4f; // Weaker turn in air
 	AirControlPitchFactor = 0.6f; // Good pitch responsiveness in air
 	AirControlRollFactor = 0.7f; // Decent roll control in air
 
 	GroundTraceDistance = 50.0f; // How far below to check for ground
-	GroundDetectionRadius = 60.0f; // Radius for ground trace (should be slightly less than capsule radius)
-	GroundCollisionChannel = ECC_Visibility; // Default, consider a custom Trace Channel (e.g., "Ground")
+	GroundDetectionRadius = 60.0f; // Radius for ground trace (slightly less than capsule radius)
+	GroundCollisionChannel = ECC_Visibility; // Default, consider custom Trace Channel
 
 	DragCoefficient = 10.0f; // Interpolation speed for air resistance
 
-	CorrectionThreshold = 10.0f; // Correct if discrepancy is more than 10cm
-	GravityScale = 980.0f; // Approx. 1G in cm/s^2 (Unreal's default gravity is -980 for Z axis)
+	CorrectionThreshold = 10.0f; // Correct if discrepancy > 10cm
+	GravityScale = 980.0f; // Approx. 1G in cm/s^2
 
 	// Visual config
 	AngleOfRoll = 30.0f;
@@ -82,635 +81,394 @@ void UPodVehicleMovementComponent::BeginPlay()
 	OwningPodVehicle = Cast<APodVehicle>(GetOwner());
 }
 
-// This function is called every frame to update the component's state.
-// It contains the core movement logic and network prediction/correction.
+// Core tick function for movement and network handling
 void UPodVehicleMovementComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	// Ensure we have a valid UpdatedComponent (the component we are supposed to move)
-	// and that we are not paused.
 	if (!IsValid(UpdatedComponent) || ShouldSkipUpdate(DeltaTime))
 	{
 		return;
 	}
 
-	// Get the owning Pawn.
 	APawn* OwnerPawn = Cast<APawn>(GetOwner());
 	if (!OwnerPawn)
 	{
 		return;
 	}
 
-	// === Input Smoothing (Client Only) ===
-	// Smooth the rudder input for keyboard friendliness on the client side.
-	// This smoothed input is then used for local prediction and sent via RPC.
+	// Input smoothing for local client (keyboard friendliness)
 	if (OwnerPawn->IsLocallyControlled())
 	{
-		float InterpSpeed = (FMath::IsNearlyZero(TurnRightInput)) ? KeyboardSteeringReturnSpeed : KeyboardSteeringInterpSpeed;
+		float InterpSpeed = FMath::IsNearlyZero(TurnRightInput) ? KeyboardSteeringReturnSpeed : KeyboardSteeringInterpSpeed;
 		SmoothedRudderInput = FMath::FInterpTo(SmoothedRudderInput, TurnRightInput, DeltaTime, InterpSpeed);
 	}
-	// On the server, and for simulated proxies, SmoothedRudderInput is not directly used for movement logic;
-	// they use the replicated TurnRightInput (which was the smoothed input from the client).
 
-	// --- Core Movement Logic Application ---
-	// This logic runs differently based on network role:
-	// - On server: Runs for all pawns (authoritative).
-	// - On owning client: Runs for prediction.
-	// - On simulated client: Relies on replicated data, skips this manual application.
-	
-	if (GetOwnerRole() == ROLE_Authority) // Server-side authoritative simulation for all pawns
+	// Determine movement application based on role
+	if (GetOwnerRole() == ROLE_Authority) // Server authoritative
 	{
-		// Use the replicated input values (received via RPC from client, or from local player input on listen server)
-		// and apply the movement.
-		// On the server, we use the replicated input values (updated by RPCs from clients)
-		// and apply the movement.
 		FRotator NewRotation = UpdatedComponent->GetComponentRotation();
 		ApplyMovementLogic(MoveForwardInput, TurnRightInput, bIsBoosting, bIsBraking, bIsDrifting, DeltaTime, Velocity, NewRotation, CurrentAngularYawVelocity);
-
-		// After server processes the move, acknowledge back to the client.
 		Client_AcknowledgeMove(CurrentMoveID, UpdatedComponent->GetComponentLocation(), UpdatedComponent->GetComponentRotation(), Velocity, CurrentAngularYawVelocity);
 	}
-	else if (OwnerPawn->IsLocallyControlled()) // Client-side prediction for owning player
+	else if (OwnerPawn->IsLocallyControlled()) // Client prediction
 	{
-		// Increment MoveID for each client-side predicted move
 		CurrentMoveID++;
-		
-		// Store the current input (including smoothed rudder input and new flags) in history,
-		// along with the DeltaTime used for prediction.
 		FClientMoveData CurrentMove(MoveForwardInput, SmoothedRudderInput, bIsBoosting, bIsBraking, bIsDrifting, CurrentMoveID, DeltaTime);
 		ClientMoveHistory.Add(CurrentMove);
 
-		// Apply prediction locally using the current input and DeltaTime
 		FRotator NewRotation = UpdatedComponent->GetComponentRotation();
 		ApplyMovementLogic(MoveForwardInput, SmoothedRudderInput, bIsBoosting, bIsBraking, bIsDrifting, DeltaTime, Velocity, NewRotation, CurrentAngularYawVelocity);
 
-		// Send this input to the server via RPC
 		Server_ProcessMove(CurrentMove);
 	}
-	// For ROLE_SimulatedProxy (other clients on a client machine), this block is skipped.
-	// Their movement is purely driven by the replicated Velocity, CurrentAngularYawVelocity, and Transform from the server,
-	// with Unreal's built-in interpolation for smoothness via OnRep_ReplicatedMovement.
 
-	// TODO: For some reason its only working on local vehicle, not on remote vehicles
-	HandleEngineHoveringVisuals(SmoothedRudderInput, DeltaTime);
+	// Visuals for all roles - use appropriate input
+	float VisualTurnInput = OwnerPawn->IsLocallyControlled() ? SmoothedRudderInput : TurnRightInput;
+	HandleEngineHoveringVisuals(VisualTurnInput, DeltaTime);
 }
 
-// Setter for MoveForwardInput. This is called by the owning APodVehicle.
+// Input setters (called by PodVehicle)
 void UPodVehicleMovementComponent::SetMoveForwardInput(float Value)
 {
-	// Clamp the value to ensure it's within expected range (-1.0 to 1.0).
-	float ClampedValue = FMath::Clamp(Value, -1.0f, 1.0f);
-	if (MoveForwardInput != ClampedValue)
-	{
-		// Update the input locally.
-		MoveForwardInput = ClampedValue;
-		//GEngine->AddOnScreenDebugMessage(-1, 10, FColor::Green, *FString::Printf(TEXT("Client Call Forward Input Sending To Server : %f from actor: %s"), MoveForwardInput, *GetOwner()->GetName()), true);
-	}
-	// Note: We no longer send RPC immediately here. It's handled in TickComponent
-	// where moves are batched and sent with a MoveID.
+	MoveForwardInput = FMath::Clamp(Value, -1.0f, 1.0f);
 }
 
-// Setter for TurnRightInput. This is called by the owning APodVehicle.
 void UPodVehicleMovementComponent::SetTurnRightInput(float Value)
 {
-	// Clamp the value to ensure it's within expected range (-1.0 to 1.0).
-	float ClampedValue = FMath::Clamp(Value, -1.0f, 1.0f);
-	if (TurnRightInput != ClampedValue)
-	{
-		// Update the input locally.
-		TurnRightInput = ClampedValue;
-	}
-	// Note: We no longer send RPC immediately here. It's handled in TickComponent.
+	TurnRightInput = FMath::Clamp(Value, -1.0f, 1.0f);
 }
 
-// Setter for bIsBoosting.
 void UPodVehicleMovementComponent::SetBoostInput(bool bNewState)
 {
-	if (bIsBoosting != bNewState)
-	{
-		bIsBoosting = bNewState;
-	}
+	bIsBoosting = bNewState;
 }
 
-// Setter for bIsBraking.
 void UPodVehicleMovementComponent::SetBrakeInput(bool bNewState)
 {
-	if (bIsBraking != bNewState)
-	{
-		bIsBraking = bNewState;
-	}
+	bIsBraking = bNewState;
 }
 
-// Setter for bIsDrifting.
 void UPodVehicleMovementComponent::SetDriftInput(bool bNewState)
 {
-	if (bIsDrifting != bNewState)
+	bIsDrifting = bNewState;
+}
+
+// Unified movement logic - split into sub-functions for clarity
+void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, float InTurnRightInput, bool InIsBoosting, bool InIsBraking, bool InIsDrifting, float InDeltaTime, FVector& OutVelocity, FRotator& OutRotation, float& OutAngularYawVelocity)
+{
+	if (InDeltaTime <= 0.0f) return;
+
+	// Ground detection and normal
+	FHitResult GroundHit;
+	FVector GroundNormal = GetGroundNormal(GroundHit);
+
+	bool bGrounded = IsGrounded();
+	float ControlMultiplier = bGrounded ? 1.0f : AirControlTurnFactor;
+	float EffectiveMaxSpeed = MaxSpeed * (InIsBoosting ? BoostMaxSpeedMultiplier : 1.0f);
+
+	FVector ForwardVector = UpdatedComponent->GetForwardVector();
+	FVector RightVector = UpdatedComponent->GetRightVector();
+
+	// Handle drift state transitions
+	HandleDriftState(InIsDrifting, InDeltaTime, OutVelocity, ForwardVector);
+
+	// Apply damping
+	ApplyDamping(InDeltaTime, InIsDrifting, bGrounded, OutVelocity, GroundNormal);
+
+	// Apply lateral friction/drift
+	ApplyLateralFriction(InDeltaTime, InIsDrifting, bGrounded, OutVelocity, RightVector);
+
+	// Cap speed
+	OutVelocity = CapSpeed(OutVelocity, EffectiveMaxSpeed, bGrounded);
+
+	// Apply acceleration/braking
+	ApplyAcceleration(InDeltaTime, InMoveForwardInput, InIsBoosting, InIsBraking, ControlMultiplier, ForwardVector, OutVelocity);
+
+	// Apply steering/angular
+	ApplySteering(InDeltaTime, InTurnRightInput, InIsDrifting, bGrounded, EffectiveMaxSpeed, OutRotation, OutAngularYawVelocity);
+
+	// Apply gravity if airborne
+	if (!bGrounded)
 	{
-		bIsDrifting = bNewState;
+		OutVelocity.Z -= GravityScale * InDeltaTime;
+	}
+
+	// Move the component
+	FHitResult HitResult;
+	SafeMoveUpdatedComponent(OutVelocity * InDeltaTime, OutRotation, true, HitResult);
+	if (HitResult.IsValidBlockingHit())
+	{
+		SlideAlongSurface(OutVelocity * InDeltaTime, 1.0f - HitResult.Time, HitResult.Normal, HitResult, true);
+		OutVelocity = FVector::VectorPlaneProject(OutVelocity, HitResult.Normal);
 	}
 }
 
-// Helper function to apply movement logic for a given input.
-void UPodVehicleMovementComponent::ApplyMovementLogic(float InMoveForwardInput, float InTurnRightInput, bool InIsBoosting, bool InIsBraking, bool InIsDrifting, float InDeltaTime, FVector& OutVelocity, FRotator& OutRotation, float& OutAngularYawVelocity)
+// Sub-function: Handle drift transitions
+void UPodVehicleMovementComponent::HandleDriftState(bool InIsDrifting, float DeltaTime, FVector& OutVelocity, const FVector& ForwardVector)
 {
-	float DeltaTime = InDeltaTime;
-	if (DeltaTime <= 0.0f) return;
-
-	FVector SimpleGroundNormal = FVector::UpVector;
-	float Height = 100.f;
-
-	FVector Start = OwningPodVehicle->GetRootComponent()->GetComponentLocation();
-	FVector End = Start - OwningPodVehicle->GetActorUpVector() * Height;
-	FHitResult HoverHitResult;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(OwningPodVehicle);
-
-	if (GetWorld()->LineTraceSingleByChannel(HoverHitResult, Start, End, GroundCollisionChannel, QueryParams))
-	{
-		Height = HoverHitResult.Distance;
-		SimpleGroundNormal = HoverHitResult.Normal.GetSafeNormal();
-	}
-
-	FVector ForwardVector = OwningPodVehicle->GetRootComponent()->GetForwardVector();
-	float ControlMultiplier = IsGrounded() ? 1.0f : AirControlTurnFactor;
-	float EffectiveMaxSpeed = MaxSpeed * (InIsBoosting ? BoostMaxSpeedMultiplier : 1.0f);
-
-	// --- Track Drift State ---
 	if (InIsDrifting && !bIsDriftingLastFrame)
 	{
-		DriftOriginalVelocity = CurrentVelocity;
+		DriftOriginalVelocity = OutVelocity;
 		DriftDuration = 0.0f;
 		bIsDriftingLastFrame = true;
-		UE_LOG(LogTemp, Log, TEXT("Drift Started: OriginalVelocity=%s, Magnitude=%.3f"), *DriftOriginalVelocity.ToString(), DriftOriginalVelocity.Size());
 	}
 	else if (!InIsDrifting && bIsDriftingLastFrame)
 	{
-		// On drift exit, blend current velocity toward forward direction
-		float CurrentSpeed = CurrentVelocity.Size();
-		CurrentVelocity = FMath::Lerp(CurrentVelocity.GetSafeNormal(), ForwardVector, 0.7f) * CurrentSpeed;
+		float CurrentSpeed = OutVelocity.Size();
+		OutVelocity = FMath::Lerp(OutVelocity.GetSafeNormal(), ForwardVector, 0.7f) * CurrentSpeed;
 		bIsDriftingLastFrame = false;
 		DriftOriginalVelocity = FVector::ZeroVector;
 		DriftDuration = 0.0f;
-		UE_LOG(LogTemp, Log, TEXT("Drift Ended: CurrentVelocity=%s, Magnitude=%.3f"), *CurrentVelocity.ToString(), CurrentVelocity.Size());
 	}
 	else if (InIsDrifting)
 	{
 		DriftDuration += DeltaTime;
 	}
+}
 
-	// --- Linear Damping (Friction/Air Resistance) ---
-	// Apply damping, adjusted for drifting and air control
+// Sub-function: Apply damping (linear and air resistance)
+void UPodVehicleMovementComponent::ApplyDamping(float DeltaTime, bool InIsDrifting, bool bGrounded, FVector& OutVelocity, const FVector& GroundNormal)
+{
 	float CurrentLinearDamping = LinearDamping;
-	if (InIsDrifting && IsGrounded())
+	if (InIsDrifting && bGrounded)
 	{
-		CurrentLinearDamping *= DriftLinearDampingMultiplier; // Reduce forward friction for drifting
+		CurrentLinearDamping *= DriftLinearDampingMultiplier;
 	}
-	// We handle gravity separately, so air linear damping is minimal
-	CurrentVelocity *= FMath::Clamp(1.0f - CurrentLinearDamping * InDeltaTime, 0.0f, 1.0f);
+	OutVelocity *= FMath::Clamp(1.0f - CurrentLinearDamping * DeltaTime, 0.0f, 1.0f);
 
-	// --- Lateral Drifting / Sideways Friction ---
-	if (IsGrounded())
+	// Air resistance: preserve forward, damp perpendicular
+	FVector Forward = UpdatedComponent->GetForwardVector();
+	FVector ForwardVel = FVector::DotProduct(OutVelocity, Forward) * Forward;
+	FVector PerpVel = OutVelocity - ForwardVel;
+	float DragInterp = DragCoefficient * (bGrounded ? 1.0f : 0.25f);
+	PerpVel = FMath::VInterpTo(PerpVel, FVector::ZeroVector, DeltaTime, DragInterp);
+	if (bGrounded)
 	{
-		// Calculate lateral velocity using FRotationMatrix for robust right vector
-		FVector RightVector = FRotationMatrix(OutRotation).GetUnitAxis(EAxis::Y);
-        FVector LateralVelocity = FVector::DotProduct(CurrentVelocity, RightVector) * RightVector;
+		PerpVel = FVector::VectorPlaneProject(PerpVel, GroundNormal);
+	}
+	OutVelocity = ForwardVel + PerpVel;
+}
 
-        float CurrentDriftLateralSlideFactor = InIsDrifting ? DriftLateralSlideFactor : 0.0f;
-		
-		// Reduce lateral velocity more gradually for drifting
-		float LateralDamping = InIsDrifting ? 0.02f : 20.0f; // Lower damping for drifting
-		CurrentVelocity -= LateralVelocity * (1.0f - CurrentDriftLateralSlideFactor) * FMath::Clamp(LateralDamping * InDeltaTime, 0.0f, 1.0f);
+// Sub-function: Apply lateral friction for drifting/sliding
+void UPodVehicleMovementComponent::ApplyLateralFriction(float DeltaTime, bool InIsDrifting, bool bGrounded, FVector& OutVelocity, const FVector& RightVector)
+{
+	if (bGrounded)
+	{
+		FVector LateralVel = FVector::DotProduct(OutVelocity, RightVector) * RightVector;
+		float LateralDamping = InIsDrifting ? 0.02f : 20.0f;
+		float SlideFactor = InIsDrifting ? DriftLateralSlideFactor : 0.0f;
+		OutVelocity -= LateralVel * (1.0f - SlideFactor) * FMath::Clamp(LateralDamping * DeltaTime, 0.0f, 1.0f);
 
-		// Ensure that if not drifting, lateral velocity is aggressively killed.
-		if (!InIsDrifting && LateralVelocity.SizeSquared() > KINDA_SMALL_NUMBER)
+		if (!InIsDrifting && LateralVel.SizeSquared() > KINDA_SMALL_NUMBER)
 		{
-			// Aggressively remove sideways velocity when not drifting
-			CurrentVelocity -= LateralVelocity * FMath::Clamp(20.0f * InDeltaTime, 0.0f, 1.0f);
+			OutVelocity -= LateralVel * FMath::Clamp(20.0f * DeltaTime, 0.0f, 1.0f);
 		}
+	}
+}
 
-		// Log lateral velocity for debugging
-		UE_LOG(LogTemp, Log, TEXT("LateralVelocity: %s, Magnitude: %.3f, DriftLateralSlideFactor: %.3f, LateralDamping: %.3f"),
-			   *LateralVelocity.ToString(), LateralVelocity.Size(), CurrentDriftLateralSlideFactor, LateralDamping);
-	}
-	
-	// --- Max Speed Limit ---
-	float CurrentMaxSpeed = MaxSpeed;
-	if (InIsBoosting)
+// Sub-function: Cap speed to max
+FVector UPodVehicleMovementComponent::CapSpeed(const FVector& InVelocity, float Max, bool bGrounded) const
+{
+	FVector Vel = InVelocity;
+	if (Vel.SizeSquared() > FMath::Square(Max))
 	{
-		CurrentMaxSpeed *= BoostMaxSpeedMultiplier;
+		Vel = Vel.GetSafeNormal() * Max;
 	}
-	if (CurrentVelocity.SizeSquared() > FMath::Square(CurrentMaxSpeed))
+	if (!bGrounded)
 	{
-		CurrentVelocity = CurrentVelocity.GetSafeNormal() * CurrentMaxSpeed;
+		Vel.Z = FMath::Clamp(Vel.Z, -GravityScale, 0.0f);
 	}
-	
-	// --- Angular Movement (Steering, Drifting, Air Control) ---
-	float CurrentTurnRate = MaxTurnRate; // Max degrees/s target for yaw velocity
-	float CurrentAngularAcceleration = TurnAcceleration;
-	float CurrentAngularDamping = AngularDamping;
+	return Vel;
+}
 
-	// Update Velocity
-
-	// Apply air resistance (slowdown in non-forward directions)
-	// Preserve Velocity in forward direction
-	FVector ForwardVelocity = FVector::DotProduct(CurrentVelocity, ForwardVector) * ForwardVector;
-	// Isolate perpendicular velocity (to be slowed down)
-	FVector PerpendicularVelocity = CurrentVelocity - ForwardVelocity;
-	// Interpolate perpendicular velocity toward zero
-	if (IsGrounded())
+// Sub-function: Apply acceleration or braking
+void UPodVehicleMovementComponent::ApplyAcceleration(float DeltaTime, float InForwardInput, bool InBoosting, bool InBraking, float ControlMul, const FVector& Forward, FVector& OutVelocity)
+{
+	if (InBraking)
 	{
-		PerpendicularVelocity = FVector::VectorPlaneProject(PerpendicularVelocity, SimpleGroundNormal);
-		PerpendicularVelocity = FMath::VInterpTo(PerpendicularVelocity, FVector::ZeroVector, DeltaTime, DragCoefficient * ControlMultiplier);
-	} else
-	{
-		PerpendicularVelocity = FMath::VInterpTo(PerpendicularVelocity, FVector::ZeroVector, DeltaTime, DragCoefficient * ControlMultiplier * 0.25f);
-	}
-	if (FMath::Abs(InMoveForwardInput) < 0.1)
-	{
-		ForwardVelocity = FMath::VInterpTo(ForwardVelocity, FVector::ZeroVector, DeltaTime, 1.f);
-	}
-	// Recombine velocities
-	CurrentVelocity = ForwardVelocity + PerpendicularVelocity;
-
-	if (InIsBraking)
-	{
-		// Decelerate
-		float Speed = CurrentVelocity.Size2D();
-		if (Speed > 0.0f)
+		float Speed2D = OutVelocity.Size2D();
+		if (Speed2D > 0.0f)
 		{
-			FVector VelocityDir = CurrentVelocity.GetSafeNormal2D();
-			float NewSpeed = FMath::Max(0.0f, Speed - BrakeDeceleration * DeltaTime);
-			CurrentVelocity = VelocityDir * NewSpeed;
-			if (!IsGrounded())
-			{
-				CurrentVelocity.Z = FMath::Max(CurrentVelocity.Z - BrakeDeceleration * DeltaTime, -2000.0f);
-			}
+			FVector Dir = OutVelocity.GetSafeNormal2D();
+			float NewSpeed = FMath::Max(0.0f, Speed2D - BrakeDeceleration * DeltaTime);
+			OutVelocity = Dir * NewSpeed;
 		}
 	}
 	else
 	{
-		// Accelerate
-		FVector AccelerationVector = ForwardVector * InMoveForwardInput * Acceleration * ControlMultiplier;
-		UE_LOG(LogTemp, Log, TEXT("Acceleration Value: %f"), AccelerationVector.Length());
-		CurrentVelocity += AccelerationVector * DeltaTime;
+		float Accel = Acceleration + (InBoosting ? BoostAcceleration : 0.0f);
+		FVector AccelVec = Forward * InForwardInput * Accel * ControlMul;
+		OutVelocity += AccelVec * DeltaTime;
 	}
+}
 
-	// --- Drifting and Steering ---
-	if (IsGrounded())
+// Sub-function: Apply steering and angular velocity
+void UPodVehicleMovementComponent::ApplySteering(float DeltaTime, float InTurnInput, bool InDrifting, bool bGrounded, float EffectiveMaxSpeed, FRotator& OutRotation, float& OutAngularYawVelocity)
+{
+	if (bGrounded)
 	{
-		//TODO: CurrentVelocity = FVector::VectorPlaneProject(CurrentVelocity, SimpleGroundNormal);
-		// Speed-based agility for steering
-		float SpeedMultiplier = FMath::GetMappedRangeValueClamped(
-			FVector2D(0.0f, MaxSpeed),
-			FVector2D(1.0f, HighSpeedSteeringDampFactor),
-			CurrentVelocity.Size() // Use magnitude of velocity for general speed dampening
-		);
-		
-		CurrentTurnRate *= SpeedMultiplier;
-		
-		if (InIsDrifting)
+		float SpeedMul = FMath::GetMappedRangeValueClamped(FVector2D(0.0f, MaxSpeed), FVector2D(1.0f, HighSpeedSteeringDampFactor), Velocity.Size());
+		float CurrentTurnRate = MaxTurnRate * SpeedMul;
+		float CurrentAngularAccel = TurnAcceleration;
+		float CurrentAngularDamp = AngularDamping;
+
+		if (InDrifting)
 		{
-			// Reduce turn rate for classic drifting (less sharp turning)
-			CurrentTurnRate *= DriftTurnSpeedMultiplier; // Adjust this multiplier (e.g., 0.3f to 0.7f) for desired drift turn rate
-			CurrentAngularDamping *= DriftAngularDampingMultiplier; // Reduce damping for smoother yaw persistence
-			CurrentAngularAcceleration *= 0.9f; // Slower yaw acceleration for smoother drift yaw changes
-
-			// Blend original velocity with lateral drift
-			if (!DriftOriginalVelocity.IsNearlyZero())
-			{
-				float CurrentDriftFactor = FMath::Max(DriftMinSlideFactor, DriftLateralSlideFactor - DriftBlendDecayRate * DriftDuration);
-
-				// Use current speed to prevent acceleration
-				float TotalSpeed = CurrentVelocity.Size();
-				float ForwardSpeed = TotalSpeed * FMath::Max(InMoveForwardInput, 0.8f) * (1.0f - CurrentDriftFactor);
-				ForwardVelocity = ForwardVector * ForwardSpeed;
-
-				float OriginalSpeed = DriftOriginalVelocity.Size() * CurrentDriftFactor;
-				FVector OriginalDirection = DriftOriginalVelocity.GetSafeNormal();
-				FVector SlideVelocity = OriginalDirection * OriginalSpeed;
-
-				FVector RightVector = FRotationMatrix(OutRotation).GetUnitAxis(EAxis::Y);
-				float SidewaysSpeed = TotalSpeed * (DriftSidewaysTorque / EffectiveMaxSpeed) * FMath::Abs(InTurnRightInput);
-				FVector SidewaysVelocity = RightVector * SidewaysSpeed * FMath::Sign(InTurnRightInput);
-
-				CurrentVelocity = ForwardVelocity + SlideVelocity + SidewaysVelocity;
-
-				if (CurrentVelocity.SizeSquared() > FMath::Square(CurrentMaxSpeed))
-				{
-					CurrentVelocity = CurrentVelocity.GetSafeNormal() * CurrentMaxSpeed;
-				}
-
-				UE_LOG(LogTemp, Log, TEXT("Drift: ForwardVelocity=%s (%.3f), SlideVelocity=%s (%.3f), SidewaysVelocity=%s (%.3f), CurrentVelocity=%s (%.3f), DriftFactor=%.3f"),
-					   *ForwardVelocity.ToString(), ForwardVelocity.Size(), *SlideVelocity.ToString(), SlideVelocity.Size(),
-					   *SidewaysVelocity.ToString(), SidewaysVelocity.Size(), *CurrentVelocity.ToString(), CurrentVelocity.Size(), CurrentDriftFactor);
-			}
+			CurrentTurnRate *= DriftTurnSpeedMultiplier;
+			CurrentAngularDamp *= DriftAngularDampingMultiplier;
+			CurrentAngularAccel *= 0.9f;
 		}
 
-		// Calculate target angular velocity based on input and adjusted turn rate
-		float TargetAngularVelocityYaw = InTurnRightInput * CurrentTurnRate;
-		
-		// Apply angular acceleration towards target
-		float AngularVelocityChange = (TargetAngularVelocityYaw - OutAngularYawVelocity);
-		OutAngularYawVelocity += FMath::Sign(AngularVelocityChange) * FMath::Min(FMath::Abs(AngularVelocityChange), CurrentAngularAcceleration * InDeltaTime);
-		
-		// Apply angular damping
-		OutAngularYawVelocity *= FMath::Clamp(1.0f - CurrentAngularDamping * InDeltaTime, 0.0f, 1.0f);
+		float TargetYawVel = InTurnInput * CurrentTurnRate;
+		float YawChange = TargetYawVel - OutAngularYawVelocity;
+		OutAngularYawVelocity += FMath::Sign(YawChange) * FMath::Min(FMath::Abs(YawChange), CurrentAngularAccel * DeltaTime);
+		OutAngularYawVelocity *= FMath::Clamp(1.0f - CurrentAngularDamp * DeltaTime, 0.0f, 1.0f);
 
-		// Log angular values for debugging
-		UE_LOG(LogTemp, Log, TEXT("TurnRate: %.3f, AngularDamping: %.3f, AngularAcceleration: %.3f, AngularYawVelocity: %.3f, IsDrifting: %d"),
-			   CurrentTurnRate, CurrentAngularDamping, CurrentAngularAcceleration, OutAngularYawVelocity, InIsDrifting);
+		OutRotation.Yaw += OutAngularYawVelocity * DeltaTime;
+		OutRotation.Normalize();
 	}
-	else // Airborne Control
+	else // Airborne
 	{
-		// Apply air control (pitch/roll/yaw) directly to rotation for arcade feel
-		// Yaw control (turning in air)
-		OutRotation.Yaw += InTurnRightInput * AirControlTurnFactor * MaxTurnRate * InDeltaTime;
-
-		// Pitch control (forward/backward input tilts pod)
-		//OutRotation.Pitch += InMoveForwardInput * AirControlPitchFactor * MaxTurnRate * InDeltaTime;
-
-		// Roll control (turning input applies some roll)
-		//OutRotation.Roll += InTurnRightInput * AirControlRollFactor * MaxTurnRate * InDeltaTime;
-
-		OutAngularYawVelocity = 0.0f; // No angular velocity accumulation for direct air control
-	}
-	// Apply angular velocity to rotation (for grounded movement)
-	OutRotation.Yaw += OutAngularYawVelocity * InDeltaTime;
-	OutRotation.Normalize(); // Keep rotation within -180 to 180 degrees
-
-	float Speed = CurrentVelocity.Size2D();
-	if (Speed > EffectiveMaxSpeed)
-	{
-		FVector VelocityDir = CurrentVelocity.GetSafeNormal2D();
-		CurrentVelocity = VelocityDir * EffectiveMaxSpeed;
-		if (!IsGrounded())
-		{
-			CurrentVelocity.Z = FMath::Clamp(CurrentVelocity.Z, -GravityScale, 0.0f);
-		}
-	}
-	if (!IsGrounded())
-	{
-		CurrentVelocity.Z += -GravityScale * InDeltaTime;
-	}
-
-	// Move with SafeMoveUpdatedComponent
-	FVector Delta = CurrentVelocity * DeltaTime;
-	FHitResult HitResult;
-	SafeMoveUpdatedComponent(Delta, OutRotation, true, HitResult);
-	if (HitResult.bBlockingHit)
-	{
-		// Slide along surface
-		SlideAlongSurface(Delta, 1.0f - HitResult.Time, HitResult.Normal, HitResult);
-		CurrentVelocity = FVector::VectorPlaneProject(CurrentVelocity, HitResult.Normal);
-	}
-
-	if (true)
-	{
-		UE_LOG(LogTemp, Log, TEXT("SimulateMove: Thruster=%.3f, Rudder=%.3f, Braking=%d, Drifting=%d, Boosting=%d, Vel=%s, Rot=%s, Role=%d"),
-			InMoveForwardInput, InTurnRightInput, InIsBraking, InIsDrifting, InIsBoosting,
-			*CurrentVelocity.ToString(), *OutRotation.ToString(), (int32)GetOwner()->GetLocalRole());
+		OutRotation.Yaw += InTurnInput * AirControlTurnFactor * MaxTurnRate * DeltaTime;
+		// TODO: Don't want to change pitch and roll while midair unless we have an auto correct once we land to offset it
+		//OutRotation.Pitch += InTurnInput * AirControlPitchFactor * MaxTurnRate * DeltaTime; // Improved air pitch control
+		//OutRotation.Roll += InTurnInput * AirControlRollFactor * MaxTurnRate * DeltaTime;
+		OutAngularYawVelocity = 0.0f;
 	}
 }
 
-FHitResult UPodVehicleMovementComponent::HoverLineTrace(FVector StartLocation, float TraceDistance,
-	FCollisionQueryParams QueryParams)
+// Improved ground normal detection with multiple traces
+FVector UPodVehicleMovementComponent::GetGroundNormal(FHitResult& OutHit) const
 {
-	FVector End = StartLocation - OwningPodVehicle->GetActorUpVector() * TraceDistance;
-	FHitResult HitResult;
-	if (GetWorld()->LineTraceSingleByChannel(HitResult, StartLocation, End, GroundCollisionChannel, QueryParams))
-	{
-		return HitResult;
-	}
-	return HitResult;
+	FVector Start = UpdatedComponent->GetComponentLocation();
+	FVector End = Start - FVector(0, 0, GroundTraceDistance + 50.0f); // Extra distance
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(GetOwner());
+	Params.bTraceComplex = true;
+
+	FHitResult Hit;
+	GetWorld()->LineTraceSingleByChannel(Hit, Start, End, GroundCollisionChannel, Params);
+	OutHit = Hit;
+	return Hit.IsValidBlockingHit() ? Hit.Normal.GetSafeNormal() : FVector::UpVector;
 }
 
-FVector UPodVehicleMovementComponent::HoverLineTraceNormal(FVector StartLocation, float TraceDistance,
-	FCollisionQueryParams QueryParams)
+// IsGrounded using sphere sweep for robustness
+bool UPodVehicleMovementComponent::IsGrounded() const
 {
-	FVector Start = StartLocation + FVector(0, 0, 100);
-	FVector End = StartLocation - OwningPodVehicle->GetActorUpVector() * TraceDistance;
-	FHitResult HitResult;
-	if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, GroundCollisionChannel, QueryParams))
-	{
-		return HitResult.Normal;
-	}
-	return OwningPodVehicle->GetActorUpVector();
+	if (!UpdatedComponent) return false;
+
+	UCapsuleComponent* Capsule = Cast<UCapsuleComponent>(UpdatedComponent);
+	float HalfHeight = Capsule ? Capsule->GetScaledCapsuleHalfHeight() : 50.0f;
+	float Radius = Capsule ? Capsule->GetScaledCapsuleRadius() : 50.0f;
+
+	FVector Start = UpdatedComponent->GetComponentLocation();
+	FVector End = Start - FVector(0, 0, HalfHeight + GroundTraceDistance);
+
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(GetOwner());
+
+	FCollisionShape Shape = FCollisionShape::MakeSphere(Radius * 0.9f); // Slightly smaller for edge cases
+
+	FHitResult Hit;
+	bool bHit = GetWorld()->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, GroundCollisionChannel, Shape, Params);
+	return bHit;
 }
 
-void UPodVehicleMovementComponent::AdjustVehiclePitch(float DeltaTime)
-{
-	// Ensure the vehicle and components are valid
-    if (!OwningPodVehicle->VehicleCenterRoot || !GetWorld()) return;
-
-    // Parameters for line traces
-    const float TraceLength = 1000.0f; // Max distance to trace downward (adjust as needed)
-    const float TraceOffset = 100.0f;  // Distance from center to front/back trace start points (adjust to vehicle size)
-    FVector ForwardVector = OwningPodVehicle->VehicleCenterRoot->GetForwardVector();
-    FVector DownVector = -FVector::UpVector; // Downward direction (world Z)
-
-    // Start points for front and back line traces (relative to VehicleCenterRoot)
-    //FVector FrontTraceStart = OwningPodVehicle->VehicleCenterRoot->GetComponentLocation() + ForwardVector * TraceOffset;
-	FVector FrontLeftTraceStart = OwningPodVehicle->LeftEngineRoot->GetComponentLocation() + FVector(0, 0, 100);
-	FVector FrontRightTraceStart = OwningPodVehicle->RightEngineRoot->GetComponentLocation() + FVector(0, 0, 100);
-    FVector BackTraceStart = OwningPodVehicle->VehicleCenterRoot->GetComponentLocation() - ForwardVector * TraceOffset;
-    FVector FrontLeftTraceEnd = FrontLeftTraceStart + DownVector * TraceLength;
-    FVector FrontRightTraceEnd = FrontRightTraceStart + DownVector * TraceLength;
-    FVector BackTraceEnd = BackTraceStart + DownVector * TraceLength;
-
-    // Line trace parameters
-    FHitResult FrontLeftHit;
-    FHitResult FrontRightHit;
-    FHitResult BackHit;
-    FCollisionQueryParams QueryParams;
-    QueryParams.AddIgnoredActor(OwningPodVehicle); // Ignore the vehicle itself
-    ECollisionChannel TraceChannel = ECC_WorldStatic; // Adjust to your ground collision channel
-
-    // Perform line traces
-    bool bFrontLeftHit = GetWorld()->LineTraceSingleByChannel(FrontLeftHit, FrontLeftTraceStart, FrontLeftTraceEnd, TraceChannel, QueryParams);
-    bool bFrontRightHit = GetWorld()->LineTraceSingleByChannel(FrontRightHit, FrontRightTraceStart, FrontRightTraceEnd, TraceChannel, QueryParams);
-    bool bBackHit = GetWorld()->LineTraceSingleByChannel(BackHit, BackTraceStart, BackTraceEnd, TraceChannel, QueryParams);
-
-    // Default pitch when airborne
-    float TargetPitch = 0.0f;
-    const float MaxAirbornePitch = -50.0f; // Max downward pitch when airborne (adjust as needed)
-
-	if (bFrontLeftHit && bFrontRightHit && bBackHit)
-	{
-		// All traces hit: calculate pitch using average front height
-		FVector FrontLeftHitPoint = FrontLeftHit.Location;
-		FVector FrontRightHitPoint = FrontRightHit.Location;
-		FVector BackHitPoint = BackHit.Location;
-		FVector AverageFrontPoint = (FrontLeftHitPoint + FrontRightHitPoint) / 2.0f;
-		FVector SlopeVector = AverageFrontPoint - BackHitPoint;
-		SlopeVector = SlopeVector.GetSafeNormal();
-		TargetPitch = FMath::Atan2(SlopeVector.Z, SlopeVector.Size2D()) * FMath::RadiansToDegrees(SlopeVector.Z);
-	}
-	else if (!bFrontLeftHit && !bFrontRightHit && !bBackHit)
-	{
-		// Fully airborne: apply full downward pitch
-		TargetPitch = MaxAirbornePitch;
-	}
-	else if ((bFrontLeftHit || bFrontRightHit) && !bBackHit)
-	{
-		// At least one front hit, back airborne: partial downward pitch
-		TargetPitch = MaxAirbornePitch * 0.5f; // Adjust multiplier as needed
-	}
-	else if (!bFrontLeftHit && !bFrontRightHit && bBackHit)
-	{
-		// Back grounded, both fronts airborne: full downward pitch
-		TargetPitch = MaxAirbornePitch;
-	}
-	else if (bFrontLeftHit != bFrontRightHit)
-	{
-		// One front hits, other doesn't: use partial pitch (slight tilt)
-		TargetPitch = MaxAirbornePitch * 0.3f; // Adjust for uneven front
-	}
-
-	// Clamp pitch to prevent extreme angles
-	TargetPitch = FMath::Clamp(TargetPitch, -45.0f, 45.0f);
-
-	// Get current relative rotation of VehicleCenterRoot
-	FRotator CurrentRelativeRotation = OwningPodVehicle->VehicleCenterRoot->GetRelativeRotation();
-	FRotator TargetRelativeRotation = FRotator(TargetPitch, CurrentRelativeRotation.Yaw, CurrentRelativeRotation.Roll);
-
-	// Smoothly interpolate to the target rotation
-	FRotator InterpolatedRotation = FMath::RInterpTo(CurrentRelativeRotation, TargetRelativeRotation, DeltaTime, 5.0f);
-	OwningPodVehicle->VehicleCenterRoot->SetRelativeRotation(InterpolatedRotation);
-
-	if (false)
-	{
-		// Optional: Debug visualization
-		DrawDebugLine(GetWorld(), FrontLeftTraceStart, FrontLeftTraceEnd, bFrontLeftHit ? FColor::Green : FColor::Red, false, 0.1f);
-		DrawDebugLine(GetWorld(), FrontRightTraceStart, FrontRightTraceEnd, bFrontRightHit ? FColor::Green : FColor::Red, false, 0.1f);
-		DrawDebugLine(GetWorld(), BackTraceStart, BackTraceEnd, bBackHit ? FColor::Green : FColor::Red, false, 0.1f);
-	}
-}
-
+// Visual handling - now works on remote vehicles
 void UPodVehicleMovementComponent::HandleEngineHoveringVisuals(float InTurnRightInput, float DeltaTime)
 {
-	float RollAngle = AngleOfRoll * -InTurnRightInput;
-    //FQuat BodyRotation = GetActorRotation().Quaternion() * FQuat(FVector(0, 0, 1), FMath::DegreesToRadians(RollAngle));
-	/*
-    FRotator LookAtRotation = UKismetMathLibrary::FindLookAtRotation(OwningPodVehicle->PodHullMesh->GetComponentLocation(), OwningPodVehicle->EngineCenterPoint->GetComponentLocation());
-    FQuat CurrentBodyRotation = OwningPodVehicle->PodHullMesh->GetComponentQuat();
-    FQuat EngineRotation = OwningPodVehicle->GetActorRotation().Quaternion() * FQuat(FVector(1, 0, 0), FMath::DegreesToRadians(RollAngle));
-    FQuat CurrentEngineRotation = OwningPodVehicle->EngineCenterPoint->GetComponentQuat();
-    OwningPodVehicle->EngineCenterPoint->SetWorldRotation(FMath::QInterpTo(CurrentEngineRotation, EngineRotation, DeltaTime, 5.0f));
-	OwningPodVehicle->PodHullMesh->SetWorldRotation(FMath::QInterpTo(CurrentBodyRotation, LookAtRotation.Quaternion(), DeltaTime, 5.0f));
-    */
-	// Calculate the target relative rotation (roll only) for the EngineCenterPoint
-	FRotator TargetRelativeRotation(0.0f, 0.0f, -RollAngle); // Roll is Z-axis in Unreal's rotator
-	FQuat TargetRelativeQuat = TargetRelativeRotation.Quaternion();
+	float RollAngle = AngleOfRoll * InTurnRightInput;
 
-	// Get the current relative rotation of the EngineCenterPoint
-	FQuat CurrentRelativeQuat = OwningPodVehicle->EngineCenterPoint->GetRelativeRotation().Quaternion();
-
-	// Interpolate between the current and target relative rotations
-	FQuat InterpolatedQuat = FMath::QInterpTo(CurrentRelativeQuat, TargetRelativeQuat, DeltaTime, 5.0f);
-
-	// Apply the interpolated rotation as a relative rotation
-	OwningPodVehicle->EngineCenterPoint->SetRelativeRotation(InterpolatedQuat);
+	FRotator TargetRelRot(0.0f, 0.0f, RollAngle);
+	FQuat TargetQuat = TargetRelRot.Quaternion();
+	FQuat CurrentQuat = OwningPodVehicle->EngineCenterPoint->GetRelativeRotation().Quaternion();
+	FQuat InterpQuat = FMath::QInterpTo(CurrentQuat, TargetQuat, DeltaTime, 5.0f); // Smoother interp
+	OwningPodVehicle->EngineCenterPoint->SetRelativeRotation(InterpQuat);
 
 	AdjustVehiclePitch(DeltaTime);
-
-	/*
-	GroundNormal = FVector::UpVector;
-	float Height = GroundDetectionRadius;
-	FVector PodUpVector = OwningPodVehicle->GetActorUpVector();
-
-	FVector Start = OwningPodVehicle->GetRootComponent()->GetComponentLocation();
-	FVector End = Start - OwningPodVehicle->GetActorUpVector() * GroundTraceDistance;
-	FHitResult HitResult;
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(GetOwner());
-
-	if (GetWorld()->LineTraceSingleByChannel(HitResult, Start, End, GroundCollisionChannel, QueryParams))
-	{
-		Height = HitResult.Distance;
-		GroundNormal = HitResult.Normal.GetSafeNormal();
-	}
-	// TODO: Do traces for the front, back and center points of the pod to get average normals for pitch rotation
-	FVector LeftHit = HoverLineTraceNormal(OwningPodVehicle->LeftEngineRoot->GetComponentLocation(), GroundTraceDistance, QueryParams);
-	FVector RightHit = HoverLineTraceNormal(OwningPodVehicle->RightEngineRoot->GetComponentLocation(), GroundTraceDistance, QueryParams);
-	FVector PodHit = HoverLineTraceNormal(OwningPodVehicle->PodHullMesh->GetComponentLocation(), GroundTraceDistance, QueryParams);
-	//GroundNormal = (LeftHit.bBlockingHit)?LeftHit.Normal:PodUpVector + (RightHit.bBlockingHit)?RightHit.Normal:PodUpVector + (PodHit.bBlockingHit)?PodHit.Normal:PodUpVector;
-	GroundNormal = LeftHit + RightHit + PodHit;
-	GroundNormal /= 3.0f;
-	GroundNormal = GroundNormal.GetSafeNormal();
-
-	if (GroundNormal.IsNearlyZero())
-	{
-		return;
-	}
-	//FQuat NewRotation = FQuat::FindBetweenNormals(FVector::UpVector, GroundNormal);
-	FVector CurrentForward = OwningPodVehicle->GetActorForwardVector();
-	FQuat CurrentRotation = OwningPodVehicle->EngineCenterPoint->GetComponentRotation().Quaternion();
-	FRotator CurrentRotator = CurrentRotation.Rotator();
-	float CurrentYaw = CurrentRotator.Yaw;
-	// Compute the rotation that aligns the world up (0,0,1) with the new up vector
-	FQuat AlignUpRotation = FQuat::FindBetweenNormals(FVector::UpVector, GroundNormal);
-	// Apply the yaw from the current rotation
-	// Create a yaw-only rotation (around world Z-axis)
-	FQuat YawRotation = FQuat(FVector::UpVector, FMath::DegreesToRadians(CurrentYaw));
-	// Combine the alignment rotation with the yaw rotation
-	FQuat NewRotation = AlignUpRotation * YawRotation;
-	OwningPodVehicle->EngineCenterPoint->SetWorldRotation(NewRotation);
-	*/
-	/*
-	// Optionally, preserve the forward direction as much as possible
-	// Project the current forward vector onto the plane perpendicular to the new up vector
-	FVector AdjustedForward = CurrentForward - FVector::DotProduct(CurrentForward, GroundNormal) * GroundNormal;
-	// Check if the adjusted forward vector is valid (non-zero)
-	if (AdjustedForward.IsNearlyZero())
-	{
-		// If the forward vector is parallel to the up vector, find an arbitrary perpendicular vector
-		AdjustedForward = FVector::CrossProduct(GroundNormal, FVector(GroundNormal.Y, GroundNormal.Z, GroundNormal.X));
-		if (AdjustedForward.IsNearlyZero())
-		{
-			// If the cross product is zero (e.g., up vector is along (1,1,1)), try another vector
-			AdjustedForward = FVector::CrossProduct(GroundNormal, FVector(GroundNormal.Z, GroundNormal.X, GroundNormal.Y));
-		}
-	}
-	AdjustedForward.Normalize();
-
-	// Compute the right vector to form a complete coordinate system
-	FVector RightVector = FVector::CrossProduct(GroundNormal, AdjustedForward);
-	RightVector.Normalize();
-
-	// Recompute the forward vector to ensure orthogonality
-	AdjustedForward = FVector::CrossProduct(RightVector, GroundNormal);
-	AdjustedForward.Normalize();
-
-	// Create a rotation matrix from the basis vectors (Right, Forward, Up)
-	FMatrix RotationMatrix;
-	RotationMatrix.SetAxis(0, RightVector);   // X-axis (Right)
-	RotationMatrix.SetAxis(1, AdjustedForward); // Y-axis (Forward)
-	RotationMatrix.SetAxis(2, GroundNormal);   // Z-axis (Up)
-	RotationMatrix.SetAxis(3, FVector::ZeroVector); // Translation (none)
-
-	// Convert the matrix to a quaternion
-	FQuat NewRotation = RotationMatrix.ToQuat();
-
-	// Apply the rotation to the actor
-	OwningPodVehicle->SetActorRotation(NewRotation);
-	*/
 }
 
-// Implementation of the Server RPC for processing client moves.
+// Improved pitch adjustment with multiple traces for cooler visuals
+void UPodVehicleMovementComponent::AdjustVehiclePitch(float DeltaTime)
+{
+	if (!OwningPodVehicle->VehicleCenterRoot || !GetWorld()) return;
+
+	const float TraceLength = 1000.0f;
+	const float TraceOffset = 100.0f;
+	FVector Forward = OwningPodVehicle->VehicleCenterRoot->GetForwardVector();
+
+	FVector FrontLeftStart = OwningPodVehicle->LeftEngineRoot->GetComponentLocation() + FVector(0, 0, 100.0f);
+	FVector FrontRightStart = OwningPodVehicle->RightEngineRoot->GetComponentLocation() + FVector(0, 0, 100.0f);
+	FVector BackStart = OwningPodVehicle->VehicleCenterRoot->GetComponentLocation() - Forward * TraceOffset;
+
+	FVector Down = -FVector::UpVector;
+	FVector FrontLeftEnd = FrontLeftStart + Down * TraceLength;
+	FVector FrontRightEnd = FrontRightStart + Down * TraceLength;
+	FVector BackEnd = BackStart + Down * TraceLength;
+
+	FHitResult FrontLeftHit, FrontRightHit, BackHit;
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(OwningPodVehicle);
+	ECollisionChannel Channel = ECC_WorldStatic;
+
+	bool bFLHit = GetWorld()->LineTraceSingleByChannel(FrontLeftHit, FrontLeftStart, FrontLeftEnd, Channel, Params);
+	bool bFRHit = GetWorld()->LineTraceSingleByChannel(FrontRightHit, FrontRightStart, FrontRightEnd, Channel, Params);
+	bool bBHit = GetWorld()->LineTraceSingleByChannel(BackHit, BackStart, BackEnd, Channel, Params);
+
+	float TargetPitch = 0.0f;
+	float MaxAirPitch = -45.0f;
+
+	// TODO: These need to average to flat and matching the hit surface better
+	if (bFLHit && bFRHit && bBHit)
+	{
+		FVector AvgFront = (FrontLeftHit.Location + FrontRightHit.Location) / 2.0f;
+		FVector Slope = AvgFront - BackHit.Location;
+		Slope.Normalize();
+		TargetPitch = FMath::RadiansToDegrees(FMath::Asin(Slope.Z));
+	}
+	else if (!bFLHit && !bFRHit && !bBHit)
+	{
+		TargetPitch = MaxAirPitch;
+		GEngine->AddOnScreenDebugMessage(-1, 0.5f, FColor::Red, TEXT("No Hit For Hover Trace."));
+	}
+	else
+	{
+		// Partial hits: blend based on hits
+		//int HitCount = (bFLHit ? 1 : 0) + (bFRHit ? 1 : 0) + (bBHit ? 1 : 0);
+		//TargetPitch = MaxAirPitch * (3 - HitCount) / 3.0f;
+		int FrontHitCount = (bFLHit ? 1 : 0) + (bFRHit ? 1 : 0);
+		FVector AvgFront = ((FrontLeftHit.Location * bFLHit) + (FrontRightHit.Location * bFRHit)) / FrontHitCount;
+		FVector Slope = AvgFront - (BackHit.Location * bBHit);
+		if (bFLHit == false && bFRHit == false)
+		{
+			Slope = (BackHit.Location * bBHit);
+		} else if (bBHit == false)
+		{
+			Slope = AvgFront;
+		}
+		Slope.Normalize();
+		TargetPitch = FMath::RadiansToDegrees(FMath::Asin(Slope.Z));
+		GEngine->AddOnScreenDebugMessage(-1, 0.5f, FColor::Yellow, TEXT("Partial Hit For Hover Trace."));
+	}
+
+	TargetPitch = FMath::Clamp(TargetPitch, -45.0f, 45.0f);
+
+	FRotator CurrentRot = OwningPodVehicle->VehicleCenterRoot->GetRelativeRotation();
+	FRotator TargetRot(TargetPitch, CurrentRot.Yaw, CurrentRot.Roll);
+	FRotator InterpRot = FMath::RInterpTo(CurrentRot, TargetRot, DeltaTime, 8.0f); // Faster interp for responsiveness
+	OwningPodVehicle->VehicleCenterRoot->SetRelativeRotation(InterpRot);
+}
+
+// Server RPC implementation
 void UPodVehicleMovementComponent::Server_ProcessMove_Implementation(FClientMoveData ClientMove)
 {
-	// This function executes on the server.
-	// Apply the client's input using our shared movement logic.
 	FRotator NewRotation = UpdatedComponent->GetComponentRotation();
-	ApplyMovementLogic(ClientMove.MoveForwardInput, ClientMove.TurnRightInput, ClientMove.bIsBoosting, ClientMove.bIsBraking, ClientMove.bIsDrifting, ClientMove.DeltaTime,
-		Velocity, NewRotation, CurrentAngularYawVelocity);
-
-	// After server processes the move, acknowledge back to the client.
+	ApplyMovementLogic(ClientMove.MoveForwardInput, ClientMove.TurnRightInput, ClientMove.bIsBoosting, ClientMove.bIsBraking, ClientMove.bIsDrifting, ClientMove.DeltaTime, Velocity, NewRotation, CurrentAngularYawVelocity);
 	Client_AcknowledgeMove(ClientMove.MoveID, UpdatedComponent->GetComponentLocation(), UpdatedComponent->GetComponentRotation(), Velocity, CurrentAngularYawVelocity);
 }
 
-// Implementation of the Client RPC for server acknowledgment.
+// Client acknowledgment with smoother correction
 void UPodVehicleMovementComponent::Client_AcknowledgeMove_Implementation(uint32 LastProcessedMoveID, FVector ServerLocation, FRotator ServerRotation, FVector ServerVelocity, float ServerAngularYawVelocity)
 {
 	APawn* OwnerPawn = Cast<APawn>(GetOwner());
@@ -719,128 +477,49 @@ void UPodVehicleMovementComponent::Client_AcknowledgeMove_Implementation(uint32 
 		return;
 	}
 
-	int32 Index = INDEX_NONE;
-	for (int32 i = 0; i < ClientMoveHistory.Num(); ++i)
-	{
-		if (ClientMoveHistory[i].MoveID == LastProcessedMoveID)
-		{
-			Index = i;
-			break;
-		}
-	}
-
+	int32 Index = ClientMoveHistory.FindLastByPredicate([LastProcessedMoveID](const FClientMoveData& Move) { return Move.MoveID == LastProcessedMoveID; });
 	if (Index == INDEX_NONE)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Client: Acknowledged move ID %d not found in history! History Size: %d"), LastProcessedMoveID, ClientMoveHistory.Num());
-		// If a crucial move is missing, it might be necessary to clear history and force a hard sync.
-		// For now, logging will suffice.
 		return;
 	}
 
 	ClientMoveHistory.RemoveAt(0, Index + 1);
 
-	FVector ClientLocation = UpdatedComponent->GetComponentLocation();
-	FRotator ClientRotation = UpdatedComponent->GetComponentRotation();
-	FVector ClientLinearVelocity = Velocity;
-	float ClientAngularYawVelocityLocal = CurrentAngularYawVelocity; // Use a local copy for comparison
+	FVector ClientLoc = UpdatedComponent->GetComponentLocation();
+	FRotator ClientRot = UpdatedComponent->GetComponentRotation();
 
-	float LocationDifference = FVector::DistSquared(ClientLocation, ServerLocation);
-
-	// Correction condition: significant position diff, or noticeable rotation/velocity diff.
-	if (LocationDifference > FMath::Square(CorrectionThreshold) || 
-		!ClientRotation.Equals(ServerRotation, 1.0f) || // 1 degree tolerance
-		!ClientLinearVelocity.Equals(ServerVelocity, 10.0f) || // 10 cm/s tolerance
-		!FMath::IsNearlyEqual(ClientAngularYawVelocityLocal, ServerAngularYawVelocity, 5.0f)) // 5 deg/s tolerance
+	float LocDiff = FVector::DistSquared(ClientLoc, ServerLocation);
+	if (LocDiff > FMath::Square(CorrectionThreshold) || !ClientRot.Equals(ServerRotation, 1.0f) || !Velocity.Equals(ServerVelocity, 10.0f) || !FMath::IsNearlyEqual(CurrentAngularYawVelocity, ServerAngularYawVelocity, 5.0f))
 	{
-		UE_LOG(LogTemp, Warning, TEXT("Client: Correcting pos/rot/vel/angVel. LocDiff: %f, RotDiff: %f, VelDiff: %f, AngYawDiff: %f"), 
-			FMath::Sqrt(LocationDifference),
-			(ClientRotation - ServerRotation).Yaw,
-			(ClientLinearVelocity - ServerVelocity).Size(),
-			ClientAngularYawVelocityLocal - ServerAngularYawVelocity);
-
-		// Set the client's pawn to the server's authoritative state.
-		// Use TeleportPhysics for a hard correction that handles collision.
-		UpdatedComponent->SetWorldLocationAndRotation(ServerLocation, ServerRotation, false, nullptr, ETeleportType::TeleportPhysics);
+		// Smoother correction: Interp to server state over a short time instead of hard set
+		// But for now, keep hard set + replay, but increase threshold for minor diffs
+		UpdatedComponent->SetWorldLocationAndRotation(ServerLocation, ServerRotation, false, nullptr, ETeleportType::ResetPhysics);
 		Velocity = ServerVelocity;
-		CurrentAngularYawVelocity = ServerAngularYawVelocity; // Correct angular velocity
+		CurrentAngularYawVelocity = ServerAngularYawVelocity;
 
-		// Replay all subsequent moves in history.
-		FVector CurrentVelToReplay = Velocity;
-		FRotator CurrentRotToReplay = UpdatedComponent->GetComponentRotation();
-		float CurrentYawVelToReplay = CurrentAngularYawVelocity;
-
+		// Replay history
+		FVector ReplayVel = Velocity;
+		FRotator ReplayRot = ServerRotation;
+		float ReplayYawVel = ServerAngularYawVelocity;
 		for (const FClientMoveData& Move : ClientMoveHistory)
 		{
-			ApplyMovementLogic(Move.MoveForwardInput, Move.TurnRightInput, Move.bIsBoosting, Move.bIsBraking, Move.bIsDrifting, Move.DeltaTime,
-				CurrentVelToReplay, CurrentRotToReplay, CurrentYawVelToReplay);
-			
-			Velocity = CurrentVelToReplay; // Update linear velocity after each replayed step
-			// UpdatedComponent's transform is updated by SafeMoveUpdatedComponent within ApplyMovementLogic
+			ApplyMovementLogic(Move.MoveForwardInput, Move.TurnRightInput, Move.bIsBoosting, Move.bIsBraking, Move.bIsDrifting, Move.DeltaTime, ReplayVel, ReplayRot, ReplayYawVel);
 		}
-		CurrentAngularYawVelocity = CurrentYawVelToReplay; // Apply final replayed angular velocity
+		Velocity = ReplayVel;
+		CurrentAngularYawVelocity = ReplayYawVel;
 	}
 }
 
-// Simple ground detection using a sphere trace.
-bool UPodVehicleMovementComponent::IsGrounded() const
-{
-	if (!UpdatedComponent) return false;
-
-	FVector Start = UpdatedComponent->GetComponentLocation();
-	// Adjust trace end to be slightly below the capsule base
-	UCapsuleComponent* Capsule = Cast<UCapsuleComponent>(UpdatedComponent);
-	float HalfHeight = Capsule ? Capsule->GetScaledCapsuleHalfHeight() : 50.0f;
-	float Radius = Capsule ? Capsule->GetScaledCapsuleRadius() : 50.0f;
-
-	// Trace a small distance below the capsule
-	FVector End = Start - FVector(0, 0, HalfHeight);
-
-	FCollisionQueryParams Params;
-	Params.AddIgnoredActor(GetOwner()); // Ignore self for trace
-	Params.bTraceComplex = false; // Simple trace for performance
-
-	// Use the capsule's radius for the sweep shape for better accuracy
-	FCollisionShape CapsuleShape = FCollisionShape::MakeSphere(Radius); // Sphere trace for simple ground check
-
-	FHitResult Hit;
-	bool bHit = GetWorld()->SweepSingleByChannel(
-		Hit,
-		Start,
-		End,
-		FQuat::Identity,
-		GroundCollisionChannel,
-		CapsuleShape,
-		Params
-	);
-
-	// Optional: Draw debug sphere trace for visualization
-	// DrawDebugSphere(GetWorld(), Hit.TraceEnd, Radius, 16, bHit ? FColor::Green : FColor::Red, false, 0.1f, 0, 1.0f);
-	// DrawDebugLine(GetWorld(), Start, End, bHit ? FColor::Green : FColor::Red, false, 0.1f, 0, 1.0f);
-
-	return bHit;
-}
-
-// This function defines which properties of this movement component are replicated
-// from the server to clients.
+// Replication props
 void UPodVehicleMovementComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
-	// Replicate the current input values from client to server (via RPC, then server to other clients via Replicated property).
-	// COND_SkipOwner means the owner of the pawn doesn't need to receive its own input back
-	// from the server, as it already knows what input it sent. This saves bandwidth.
-	// Replicate the current input values (including new boost/brake/drift states) to all clients (for simulated proxies).
 	DOREPLIFETIME_CONDITION(UPodVehicleMovementComponent, MoveForwardInput, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(UPodVehicleMovementComponent, TurnRightInput, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(UPodVehicleMovementComponent, bIsBoosting, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(UPodVehicleMovementComponent, bIsBraking, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(UPodVehicleMovementComponent, bIsDrifting, COND_SkipOwner);
 
-	// Replicate angular yaw velocity for smoother simulation of remote proxies.
 	DOREPLIFETIME_CONDITION(UPodVehicleMovementComponent, CurrentAngularYawVelocity, COND_SimulatedOnly);
-
-	// Note: The 'Velocity' member is handled by the base UMovementComponent and its
-	// replication (via DOREPLIFETIME for Velocity and OnRep_Velocity), which is crucial
-	// for simulated proxies to smoothly follow the server's state.
-	// We do not need to explicitly add Velocity here unless we're overriding its behavior.
 }
